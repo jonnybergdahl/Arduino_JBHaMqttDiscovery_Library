@@ -2,6 +2,7 @@
 #include <PubSubClient.h>
 #include <HaDiscovery.h>
 #include <transport/PubSubClientTransport.h>
+#include <jblogger.h>
 
 const char* ssid = "your-ssid";
 const char* password = "your-password";
@@ -12,10 +13,11 @@ const char* mqtt_pass = "your-mqtt-password";
 WiFiClient wifi;
 PubSubClient mqtt(wifi);
 PubSubClientTransport transport(mqtt);
-HaDiscovery ha(transport);
+HaDiscovery ha(transport, "homeassistant", "devices");
 
 void setup() {
   Serial.begin(115200);
+  ha.setLogLevel(LOG_LEVEL_DEBUG);
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {

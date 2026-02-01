@@ -6,6 +6,9 @@
  * @defgroup transport MQTT Transports
  * @brief Transport adapters for different MQTT client libraries.
  * @{
+ */
+
+/**
  * @brief MQTT transport adapter for AsyncMqttClient.
  *
  * AsyncMqttClient is a fully asynchronous, event-driven MQTT client.
@@ -74,21 +77,21 @@ public:
                bool retained,
                uint8_t qos) override {
     if (!isConnected) {
-      JB_LOGW("MQTT", "Async publish skipped (disconnected) topic=%s", topic);
+      if (log) log->warn("Async publish skipped (disconnected) topic=%s", topic);
       return false;
     }
 
     const char* p = payload ? reinterpret_cast<const char*>(payload) : "";
     size_t l = payload ? len : 0;
 
-    JB_LOGD("MQTT", "Async publish topic=%s len=%u retained=%d qos=%u", topic,
-           (unsigned)l, retained ? 1 : 0, (unsigned)qos);
+    if (log) log->debug("Async publish topic=%s len=%u retained=%d qos=%u", topic,
+                        (unsigned)l, retained ? 1 : 0, (unsigned)qos);
 
     uint16_t pid = client.publish(topic, qos, retained, p, l);
     if (pid == 0) {
-      JB_LOGE("MQTT", "Async publish FAILED topic=%s", topic);
+      if (log) log->error("Async publish FAILED topic=%s", topic);
     } else {
-      JB_LOGD("MQTT", "Async publish OK topic=%s pid=%u", topic, (unsigned)pid);
+      if (log) log->debug("Async publish OK topic=%s pid=%u", topic, (unsigned)pid);
     }
     return true;
   }
@@ -116,6 +119,7 @@ private:
   AsyncMqttClient& client;
   volatile bool isConnected = false;
   void (*cb)(void*) = nullptr;
+  /** @brief Pointer to user context for callback. */
   void* ctx = nullptr;
 };
 /** @} */

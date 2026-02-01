@@ -3,6 +3,11 @@
 #include <string.h>
 #include <ArduinoJson.h>
 
+#if __has_include(<jblogger.h>)
+#include <jblogger.h>
+#define HAS_LOG
+#endif
+
 static const char* kAvailOnline = "online";
 static const char* kAvailOffline = "offline";
 static const char* kOn = "ON";
@@ -15,8 +20,14 @@ HaDiscovery::HaDiscovery(MqttTransport& transport,
                          const char* base_topic_prefix)
   : t(transport),
     discoveryPrefix(discovery_prefix ? discovery_prefix : "homeassistant"),
-    baseTopicPrefix(base_topic_prefix ? base_topic_prefix : "devices") {
+    baseTopicPrefix(base_topic_prefix ? base_topic_prefix : "devices"),
+    log("HaDiscovery") {
+  t.setLogger(&log);
   t.setOnConnect(&HaDiscovery::onTransportConnectThunk, this);
+}
+
+void HaDiscovery::setLogLevel(LogLevel level) {
+  log.setLogLevel(level);
 }
 
 void HaDiscovery::setDevice(const HaDeviceInfo& dev) {
@@ -32,6 +43,9 @@ void HaDiscovery::onTransportConnectThunk(void* ctx) {
 }
 
 void HaDiscovery::onTransportConnect() {
+#ifdef HAS_LOG
+  log.info("MQTT Transport connected");
+#endif
   // Default behavior: publish availability online on connect.
   // Optional enhancement: re-publish all registered discovery configs.
   publishAvailabilityOnline(true, 1);
@@ -46,6 +60,9 @@ void HaDiscovery::publishAvailabilityOnline(bool retained, uint8_t qos) {
 void HaDiscovery::publishAvailabilityOffline(bool retained, uint8_t qos) {
   char topic[TOPIC_BUF];
   buildDefaultAvailabilityTopic(topic, sizeof(topic));
+#ifdef HAS_LOG
+  log.info("Publishing availability offline to %s", topic);
+#endif
   t.publish(topic, reinterpret_cast<const uint8_t*>(kAvailOffline), strlen(kAvailOffline), retained, qos);
 }
 
@@ -113,11 +130,18 @@ bool HaDiscovery::publishState(const char* object_id, const char* payload, bool 
   char topic[TOPIC_BUF];
   buildDefaultStateTopic(topic, sizeof(topic), object_id);
 
-  return t.publish(topic,
-                   reinterpret_cast<const uint8_t*>(payload),
-                   strlen(payload),
-                   retained,
-                   qos);
+#ifdef HAS_LOG
+  log.debug("Publishing state to %s: %s", topic, payload);
+#endif
+  bool ok = t.publish(topic,
+                      reinterpret_cast<const uint8_t*>(payload),
+                      strlen(payload),
+                      retained,
+                      qos);
+#ifdef HAS_LOG
+  if (!ok) log.error("Failed to publish state to %s", topic);
+#endif
+  return ok;
 }
 
 bool HaDiscovery::publishStateSwitch(const char* object_id, bool on, bool retained, uint8_t qos) {
@@ -146,11 +170,18 @@ void HaDiscovery::buildDefaultAvailabilityTopic(char* out, size_t outLen) const 
 }
 
 bool HaDiscovery::publishConfigJson(const char* topic, const char* json, bool retained, uint8_t qos) {
-  return t.publish(topic,
-                   reinterpret_cast<const uint8_t*>(json),
-                   strlen(json),
-                   retained,
-                   qos);
+#ifdef HAS_LOG
+  log.debug("Publishing discovery config to %s", topic);
+#endif
+  bool ok = t.publish(topic,
+                      reinterpret_cast<const uint8_t*>(json),
+                      strlen(json),
+                      retained,
+                      qos);
+#ifdef HAS_LOG
+  if (!ok) log.error("Failed to publish discovery config to %s", topic);
+#endif
+  return ok;
 }
 
 bool HaDiscovery::buildSensorConfigJson(char* out, size_t outLen, const HaSensorConfig& cfg) const {

@@ -6,6 +6,9 @@
  * @defgroup transport MQTT Transports
  * @brief Transport adapters for different MQTT client libraries.
  * @{
+ */
+
+/**
  * @brief MQTT transport adapter for PubSubClient.
  *
  * PubSubClient is a synchronous, polling-based MQTT client.
@@ -74,8 +77,8 @@ public:
       len = 0;
     }
 
-    JB_LOGD("MQTT", "PubSub publish topic=%s len=%u retained=%d", topic,
-           (unsigned)len, retained ? 1 : 0);
+    if (log) log->debug("PubSub publish topic=%s len=%u retained=%d", topic,
+                        (unsigned)len, retained ? 1 : 0);
 
     bool ok = client.publish(topic,
                              payload,
@@ -83,9 +86,9 @@ public:
                              retained);
 
     if (!ok) {
-      JB_LOGE("MQTT", "PubSub publish FAILED topic=%s", topic);
+      if (log) log->error("PubSub publish FAILED topic=%s", topic);
     } else {
-      JB_LOGD("MQTT", "PubSub publish OK topic=%s", topic);
+      if (log) log->debug("PubSub publish OK topic=%s", topic);
     }
     return ok;
   }
@@ -128,5 +131,7 @@ private:
   std::string passStr;
   bool wasConnected = false;
   void (*cb)(void*) = nullptr;
+  /** @brief Pointer to user context for callback. */
   void* ctx = nullptr;
 };
+/** @} */

@@ -40,6 +40,9 @@ public:
         onConnectCtx = ctx;
     }
 
+    void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) override {}
+    void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") override {}
+
     void clear() {
         messages.clear();
     }
@@ -51,6 +54,7 @@ HaDiscovery* discovery;
 void setUp(void) {
     transport.clear();
     discovery = new HaDiscovery(transport, "homeassistant", "devices");
+    discovery->setLogLevel(LOG_LEVEL_NONE);
 
     HaDeviceInfo dev;
     dev.node_id = "test_node";

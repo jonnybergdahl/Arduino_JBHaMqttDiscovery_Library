@@ -119,16 +119,16 @@ struct HaSwitchConfig {
  * @brief Configuration for a Home Assistant MQTT Discovery binary_sensor.
  */
 struct HaBinarySensorConfig {
-	HaEntityCommon common;
+  HaEntityCommon common;
 
-	/** @brief Optional device_class (e.g. "motion", "door", "presence"). */
-	const char* device_class = nullptr;
+  /** @brief Optional device_class (e.g. "motion", "door", "presence"). */
+  const char* device_class = nullptr;
 
-	/** @brief Optional payload representing ON state (default "ON" if nullptr). */
-	const char* payload_on = nullptr;
+  /** @brief Optional payload representing ON state (default "ON" if nullptr). */
+  const char* payload_on = nullptr;
 
-	/** @brief Optional payload representing OFF state (default "OFF" if nullptr). */
-	const char* payload_off = nullptr;
+  /** @brief Optional payload representing OFF state (default "OFF" if nullptr). */
+  const char* payload_off = nullptr;
 };
 
 /**
@@ -138,20 +138,20 @@ struct HaBinarySensorConfig {
  * to its command topic.
  */
 struct HaButtonConfig {
-	HaEntityCommon common;
+  HaEntityCommon common;
 
-	/**
-	 * @brief Optional override for command_topic.
-	 *
-	 * If nullptr, the default topic scheme is used:
-	 * `<baseTopicPrefix>/<node_id>/<object_id>/set`.
-	 */
-	const char* command_topic_override = nullptr;
+  /**
+   * @brief Optional override for command_topic.
+   *
+   * If nullptr, the default topic scheme is used:
+   * `<baseTopicPrefix>/<node_id>/<object_id>/set`.
+   */
+  const char* command_topic_override = nullptr;
 
-	/**
-	 * @brief Optional payload to trigger the button (default "PRESS" if nullptr).
-	 */
-	const char* payload_press = nullptr;
+  /**
+   * @brief Optional payload to trigger the button (default "PRESS" if nullptr).
+   */
+  const char* payload_press = nullptr;
 };
 
 /**
@@ -178,6 +178,13 @@ public:
   HaDiscovery(MqttTransport& transport,
               const char* discovery_prefix = "homeassistant",
               const char* base_topic_prefix = "devices");
+
+  /**
+   * @brief Set the minimum log level for the internal logger.
+   *
+   * @param level The minimum log level to be logged.
+   */
+  void setLogLevel(LogLevel level);
 
   /**
    * @brief Set the device information used in `dev` object of Discovery payloads.
@@ -233,6 +240,27 @@ public:
   bool publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retained = true, uint8_t qos = 1);
 
   /**
+   * @brief Publish a binary_sensor Discovery config (retained by default).
+   *
+   * @param cfg      Binary sensor configuration
+   * @param retained Retain flag (recommended true)
+   * @param qos      QoS level (recommended 1 for discovery if supported)
+   * @return true if publish was accepted by transport, false otherwise
+   */
+  bool publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained = true, uint8_t qos = 1);
+
+  /**
+   * @brief Publish a button Discovery config (retained by default).
+   *
+   * @param cfg      Button configuration
+   * @param retained Retain flag (recommended true)
+   * @param qos      QoS level (recommended 1 for discovery if supported)
+   * @return true if publish was accepted by transport, false otherwise
+   */
+  bool publishButtonDiscovery(const HaButtonConfig& cfg, bool retained = true, uint8_t qos = 1);
+
+
+  /**
    * @brief Remove an entity from Home Assistant by clearing its retained config topic.
    *
    * Home Assistant removes the entity when the Discovery config topic is published
@@ -243,28 +271,6 @@ public:
    * @param qos       QoS level (recommended 1 if supported)
    * @return true if publish was accepted by transport, false otherwise
    */
-
-	/**
-	   * @brief Publish a binary_sensor Discovery config (retained by default).
-	   *
-	   * @param cfg      Binary sensor configuration
-	   * @param retained Retain flag (recommended true)
-	   * @param qos      QoS level (recommended 1 for discovery if supported)
-	   * @return true if publish was accepted by transport, false otherwise
-	   */
-	bool publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained = true, uint8_t qos = 1);
-
-	/**
-	 * @brief Publish a button Discovery config (retained by default).
-	 *
-	 * @param cfg      Button configuration
-	 * @param retained Retain flag (recommended true)
-	 * @param qos      QoS level (recommended 1 for discovery if supported)
-	 * @return true if publish was accepted by transport, false otherwise
-	 */
-	bool publishButtonDiscovery(const HaButtonConfig& cfg, bool retained = true, uint8_t qos = 1);
-
-
   bool removeEntity(const char* component, const char* object_id, uint8_t qos = 1);
 
   /**
@@ -289,7 +295,7 @@ public:
    */
   bool publishStateSwitch(const char* object_id, bool on, bool retained = false, uint8_t qos = 0);
 
-	/**
+  /**
    * @brief Publish a button "press" command to the default command topic.
    *
    * @param object_id Entity object_id
@@ -298,39 +304,50 @@ public:
    * @param qos       QoS level (usually 0 or 1)
    * @return true if publish was accepted by transport, false otherwise
    */
-	bool pressButton(const char* object_id, const char* payload = nullptr, bool retained = false, uint8_t qos = 0);
+  bool pressButton(const char* object_id, const char* payload = nullptr, bool retained = false, uint8_t qos = 0);
 
   // Convenience overloads for std::string parameters
+
+  /** @brief Overload of removeEntity using std::string. */
   inline bool removeEntity(const std::string& component, const std::string& object_id, uint8_t qos = 1) {
     return removeEntity(component.c_str(), object_id.c_str(), qos);
   }
+  /** @brief Overload of removeEntity using std::string for object_id. */
   inline bool removeEntity(const char* component, const std::string& object_id, uint8_t qos = 1) {
     return removeEntity(component, object_id.c_str(), qos);
   }
+  /** @brief Overload of removeEntity using std::string for component. */
   inline bool removeEntity(const std::string& component, const char* object_id, uint8_t qos = 1) {
     return removeEntity(component.c_str(), object_id, qos);
   }
 
+  /** @brief Overload of publishState using std::string. */
   inline bool publishState(const std::string& object_id, const std::string& payload, bool retained = false, uint8_t qos = 0) {
     return publishState(object_id.c_str(), payload.c_str(), retained, qos);
   }
+  /** @brief Overload of publishState using std::string for object_id. */
   inline bool publishState(const std::string& object_id, const char* payload, bool retained = false, uint8_t qos = 0) {
     return publishState(object_id.c_str(), payload, retained, qos);
   }
+  /** @brief Overload of publishState using std::string for payload. */
   inline bool publishState(const char* object_id, const std::string& payload, bool retained = false, uint8_t qos = 0) {
     return publishState(object_id, payload.c_str(), retained, qos);
   }
 
+  /** @brief Overload of publishStateSwitch using std::string for object_id. */
   inline bool publishStateSwitch(const std::string& object_id, bool on, bool retained = false, uint8_t qos = 0) {
     return publishStateSwitch(object_id.c_str(), on, retained, qos);
   }
 
+  /** @brief Overload of pressButton using std::string. */
   inline bool pressButton(const std::string& object_id, const std::string& payload, bool retained = false, uint8_t qos = 0) {
     return pressButton(object_id.c_str(), payload.c_str(), retained, qos);
   }
+  /** @brief Overload of pressButton using std::string for object_id. */
   inline bool pressButton(const std::string& object_id, const char* payload, bool retained = false, uint8_t qos = 0) {
     return pressButton(object_id.c_str(), payload, retained, qos);
   }
+  /** @brief Overload of pressButton using std::string for object_id (no payload). */
   inline bool pressButton(const std::string& object_id, bool retained = false, uint8_t qos = 0) {
     return pressButton(object_id.c_str(), nullptr, retained, qos);
   }
@@ -355,6 +372,7 @@ private:
   MqttTransport& t;
   const char* discoveryPrefix;
   const char* baseTopicPrefix;
+  JBLogger log;
   HaDeviceInfo device{};
 
   static constexpr size_t JSON_BUF = 768;

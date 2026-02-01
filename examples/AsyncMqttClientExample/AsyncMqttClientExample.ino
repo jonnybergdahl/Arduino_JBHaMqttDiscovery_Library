@@ -2,6 +2,7 @@
 #include <AsyncMqttClient.h>
 #include <HaDiscovery.h>
 #include <transport/AsyncMqttClientTransport.h>
+#include <jblogger.h>
 
 const char* ssid = "your-ssid";
 const char* password = "your-password";
@@ -15,6 +16,7 @@ HaDiscovery ha(transport);
 
 void setup() {
   Serial.begin(115200);
+  ha.setLogLevel(LOG_LEVEL_DEBUG);
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {

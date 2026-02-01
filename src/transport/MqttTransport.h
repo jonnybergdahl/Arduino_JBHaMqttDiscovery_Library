@@ -1,6 +1,42 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
+
+#if __has_include(<jblogger.h>)
+#include <jblogger.h>
+#else
+/**
+ * @brief Log level enumeration.
+ */
+enum LogLevel {
+  LOG_LEVEL_NONE = 0,    /**< No logging */
+  LOG_LEVEL_ERROR,       /**< Critical errors */
+  LOG_LEVEL_WARNING,     /**< Warnings */
+  LOG_LEVEL_INFO,        /**< Informational messages */
+  LOG_LEVEL_DEBUG,       /**< Debug information */
+  LOG_LEVEL_TRACE        /**< High-frequency trace data */
+};
+
+/**
+ * @brief Minimal logger interface used when jblogger.h is missing.
+ */
+class JBLogger {
+public:
+  /** @brief Constructor. @param moduleName Name of the module. */
+  JBLogger(const char* moduleName) {}
+  /** @brief Log a debug message. @param format Format string. */
+  virtual void debug(const char* format, ...) {}
+  /** @brief Log an info message. @param format Format string. */
+  virtual void info(const char* format, ...) {}
+  /** @brief Log a warning message. @param format Format string. */
+  virtual void warn(const char* format, ...) {}
+  /** @brief Log an error message. @param format Format string. */
+  virtual void error(const char* format, ...) {}
+  /** @brief Set the log level. @param level Minimum log level to log. */
+  virtual void setLogLevel(LogLevel level) {}
+};
+#endif
 
 /**
  * @defgroup transport MQTT Transports
@@ -102,5 +138,17 @@ public:
    * such a transport.
    */
   virtual void tick() {}
+
+  /**
+   * @brief Set the logger for this transport.
+   *
+   * @param logger Pointer to a JBLogger instance.
+   */
+  void setLogger(JBLogger* logger) {
+    this->log = logger;
+  }
+
+protected:
+  JBLogger* log = nullptr;
 };
 /** @} */
