@@ -39,3 +39,11 @@
 
 # debug information files
 *.dwo
+
+# Platform.io
+.pio/
+.idea/
+docs/
+
+# Junie
+.output.txt
