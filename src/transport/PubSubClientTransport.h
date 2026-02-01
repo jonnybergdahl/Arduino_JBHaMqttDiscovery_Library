@@ -26,6 +26,36 @@ public:
     : client(client) {}
 
   /**
+   * @brief Set MQTT server and credentials.
+   *
+   * @param host MQTT host/IP
+   * @param port MQTT port
+   * @param user MQTT username
+   * @param pass MQTT password
+   */
+  void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) override {
+    client.setServer(host, port);
+    this->user = user;
+    this->pass = pass;
+  }
+
+  /**
+   * @brief Set MQTT server and credentials (std::string version).
+   *
+   * @param host MQTT host/IP
+   * @param port MQTT port
+   * @param user MQTT username
+   * @param pass MQTT password
+   */
+  void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") override {
+    client.setServer(host.c_str(), port);
+    this->userStr = user;
+    this->passStr = pass;
+    this->user = this->userStr.c_str();
+    this->pass = this->passStr.c_str();
+  }
+
+  /**
    * @inheritdoc
    */
   bool connected() const override {
@@ -92,6 +122,10 @@ public:
 
 private:
   PubSubClient& client;
+  const char* user = nullptr;
+  const char* pass = nullptr;
+  std::string userStr;
+  std::string passStr;
   bool wasConnected = false;
   void (*cb)(void*) = nullptr;
   void* ctx = nullptr;

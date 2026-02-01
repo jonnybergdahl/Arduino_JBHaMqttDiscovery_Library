@@ -1,0 +1,23 @@
+HaDiscovery	KEYWORD1
+HaDeviceInfo	KEYWORD1
+HaEntityCommon	KEYWORD1
+HaSensorConfig	KEYWORD1
+HaSwitchConfig	KEYWORD1
+HaBinarySensorConfig	KEYWORD1
+HaButtonConfig	KEYWORD1
+MqttTransport	KEYWORD1
+PubSubClientTransport	KEYWORD1
+AsyncMqttClientTransport	KEYWORD1
+
+setDevice	KEYWORD2
+tick	KEYWORD2
+publishAvailabilityOnline	KEYWORD2
+publishAvailabilityOffline	KEYWORD2
+publishSensorDiscovery	KEYWORD2
+publishSwitchDiscovery	KEYWORD2
+publishBinarySensorDiscovery	KEYWORD2
+publishButtonDiscovery	KEYWORD2
+removeEntity	KEYWORD2
+publishState	KEYWORD2
+publishStateSwitch	KEYWORD2
+pressButton	KEYWORD2

@@ -29,6 +29,36 @@ public:
     : client(client) {}
 
   /**
+   * @brief Set MQTT server and credentials.
+   *
+   * @param host MQTT host/IP
+   * @param port MQTT port
+   * @param user MQTT username
+   * @param pass MQTT password
+   */
+  void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) override {
+    client.setServer(host, port);
+    if (user && pass) {
+      client.setCredentials(user, pass);
+    }
+  }
+
+  /**
+   * @brief Set MQTT server and credentials (std::string version).
+   *
+   * @param host MQTT host/IP
+   * @param port MQTT port
+   * @param user MQTT username
+   * @param pass MQTT password
+   */
+  void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") override {
+    client.setServer(host.c_str(), port);
+    if (!user.empty() && !pass.empty()) {
+      client.setCredentials(user.c_str(), pass.c_str());
+    }
+  }
+
+  /**
    * @inheritdoc
    */
   bool connected() const override {

@@ -73,6 +73,26 @@ public:
   virtual void setOnConnect(void (*cb)(void*), void* ctx) = 0;
 
   /**
+   * @brief Set MQTT server and credentials.
+   *
+   * @param host MQTT host/IP
+   * @param port MQTT port
+   * @param user MQTT username (optional)
+   * @param pass MQTT password (optional)
+   */
+  virtual void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) = 0;
+
+  /**
+   * @brief Set MQTT server and credentials (std::string version).
+   *
+   * @param host MQTT host/IP
+   * @param port MQTT port
+   * @param user MQTT username
+   * @param pass MQTT password
+   */
+  virtual void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") = 0;
+
+  /**
    * @brief Periodic processing hook (optional).
    *
    * This is required only for synchronous MQTT clients that do not provide

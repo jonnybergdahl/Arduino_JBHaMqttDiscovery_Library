@@ -29,17 +29,22 @@ PubSubClientTransport transport(mqtt);
 HaDiscovery ha(transport);
 
 void setup() {
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  String nodeId = "esp8266_" + mac;
+
   ha.setDevice({
-    .node_id = "esp8266_office_01",
+    .node_id = nodeId.c_str(),
     .name = "Office Node",
     .manufacturer = "YourBrand",
     .model = "ESP8266",
     .sw_version = "1.0.0",
-    .identifiers = "112233445566"
+    .identifiers = mac.c_str()
   });
 
-  // Configure mqtt server/credentials externally, then connect:
-  // mqtt.setServer(...); mqtt.connect(...);
+  // Configure mqtt server/credentials through the transport, then connect:
+  transport.setServer("mqtt-broker.local", 1883, "user", "pass");
+  mqtt.connect(nodeId.c_str(), "user", "pass");
 
   HaSwitchConfig sw{
     .common = { .object_id="relay1", .name="Desk Relay" }
@@ -71,16 +76,21 @@ AsyncMqttClientTransport transport(mqtt);
 HaDiscovery ha(transport);
 
 void setup() {
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  String nodeId = "esp32_" + mac;
+
   ha.setDevice({
-    .node_id = "esp32_kitchen_01",
+    .node_id = nodeId.c_str(),
     .name = "Kitchen Node",
     .manufacturer = "YourBrand",
     .model = "ESP32",
     .sw_version = "1.0.0",
-    .identifiers = "AABBCCDDEEFF"
+    .identifiers = mac.c_str()
   });
 
-  // Configure mqtt host/credentials/LWT externally, then connect:
+  // Configure mqtt host/credentials/LWT through the transport, then connect:
+  transport.setServer("mqtt-broker.local", 1883, "user", "pass");
   mqtt.connect();
 
   HaSensorConfig temp{
