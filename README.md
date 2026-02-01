@@ -1,5 +1,12 @@
-# Arduino_JBHaMqttDiscovery
-An Arduino library for Home Assistant MQTT Auto Discovery
+# JBHaMqttDiscovery
+An Arduino library for Home Assistant MQTT Auto Discovery.
+
+## What is this library?
+**JBHaMqttDiscovery** makes sensors and devices connected to Arduino/ESP8266/ESP32 devices show up automatically in **Home Assistant** via **MQTT Discovery**.
+
+It helps you builds the correct *discovery topics* and *JSON configuration payloads* and publishes them as **retained** messages, so Home Assistant can create entities (e.g. sensors, switches, binary sensors, buttons) without manual UI/YAML setup.
+
+It is also **transport-agnostic**: you can use different MQTT client libraries through a small “transport” adapter (e.g. PubSubClient or AsyncMqttClient), while keeping the same discovery API in your firmware.
 
 ## Usage
 
@@ -38,6 +45,13 @@ void setup() {
     .common = { .object_id="relay1", .name="Desk Relay" }
   };
   ha.publishSwitchDiscovery(sw);
+
+  HaSensorConfig temp{
+    .common = { .object_id="temperature", .name="Office Temperature" },
+    .unit_of_measurement="°C",
+    .device_class="temperature"
+  };
+  ha.publishSensorDiscovery(temp);
 }
 
 void loop() {
@@ -76,13 +90,46 @@ void setup() {
     .state_class="measurement"
   };
   ha.publishSensorDiscovery(temp);
+
+  HaSwitchConfig relay{
+    .common = { .object_id="relay1", .name="Kitchen Light" }
+  };
+  ha.publishSwitchDiscovery(relay);
 }
 
 void loop() {
   // nothing required for HaDiscovery
 }
+```
 
-## Entitity usage
+## Entity usage
+
+### Sensor
+
+```c++
+HaSensorConfig temp{
+  .common = { .object_id="temperature", .name="Kitchen Temperature", .icon="mdi:thermometer" },
+  .unit_of_measurement="°C",
+  .device_class="temperature",
+  .state_class="measurement"
+};
+ha.publishSensorDiscovery(temp);
+
+// later:
+ha.publishState("temperature", "22.5");
+```
+
+### Switch
+
+```c++
+HaSwitchConfig relay{
+  .common = { .object_id="relay1", .name="Desk Light", .icon="mdi:lightbulb" }
+};
+ha.publishSwitchDiscovery(relay);
+
+// later:
+ha.publishStateSwitch("relay1", true); // ON
+```
 
 ### Binary sensor
 
@@ -92,6 +139,9 @@ HaBinarySensorConfig motion{
   .device_class = "motion"
 };
 ha.publishBinarySensorDiscovery(motion);
+
+// later:
+ha.publishState("motion", "ON");
 ```
 
 ### Button
