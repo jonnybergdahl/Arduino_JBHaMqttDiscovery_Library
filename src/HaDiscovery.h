@@ -174,10 +174,12 @@ public:
    * @param transport         MQTT transport adapter
    * @param discovery_prefix  Home Assistant discovery prefix (default "homeassistant")
    * @param base_topic_prefix Base topic prefix for device topics (default "devices")
+   * @param log_level         Log level for the internal logger (default LOG_LEVEL_INFO)
    */
   HaDiscovery(MqttTransport& transport,
               const char* discovery_prefix = "homeassistant",
-              const char* base_topic_prefix = "devices");
+              const char* base_topic_prefix = "devices",
+              LogLevel log_level = LogLevel::LOG_LEVEL_INFO);
 
   /**
    * @brief Set the minimum log level for the internal logger.
@@ -356,10 +358,10 @@ private:
   static void onTransportConnectThunk(void* ctx);
   void onTransportConnect();
 
-  void buildConfigTopic(char* out, size_t outLen, const char* component, const char* object_id) const;
-  void buildDefaultStateTopic(char* out, size_t outLen, const char* object_id) const;
-  void buildDefaultCommandTopic(char* out, size_t outLen, const char* object_id) const;
-  void buildDefaultAvailabilityTopic(char* out, size_t outLen) const;
+  std::string buildConfigTopic(const char* component, const char* object_id) const;
+  std::string buildDefaultStateTopic(const char* object_id) const;
+  std::string buildDefaultCommandTopic(const char* object_id) const;
+  std::string buildDefaultAvailabilityTopic() const;
 
   bool publishConfigJson(const char* topic, const char* json, bool retained, uint8_t qos);
 
@@ -368,15 +370,15 @@ private:
   bool buildBinarySensorConfigJson(char* out, size_t outLen, const HaBinarySensorConfig& cfg) const;
   bool buildButtonConfigJson(char* out, size_t outLen, const HaButtonConfig& cfg) const;
 
+
 private:
-  MqttTransport& t;
-  const char* discoveryPrefix;
-  const char* baseTopicPrefix;
-  JBLogger log;
-  HaDeviceInfo device{};
+  MqttTransport& _transport;
+  std::string _discoveryPrefix;
+  std::string _baseTopicPrefix;
+  JBLogger* _log;
+  HaDeviceInfo _device{};
 
   static constexpr size_t JSON_BUF = 768;
-  static constexpr size_t TOPIC_BUF = 192;
 };
 
 /** @} */
