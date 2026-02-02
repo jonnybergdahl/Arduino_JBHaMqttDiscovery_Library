@@ -1,6 +1,8 @@
 # JBHaMqttDiscovery
 An Arduino library for Home Assistant MQTT Auto Discovery.
 
+ > This is work in progress!
+
 ## What is this library?
 **JBHaMqttDiscovery** makes sensors and devices connected to Arduino/ESP8266/ESP32 devices show up automatically in **Home Assistant** via **MQTT Discovery**.
 
