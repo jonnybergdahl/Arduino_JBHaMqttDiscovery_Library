@@ -1,4 +1,10 @@
+#ifdef ARDUINO_ARCH_ESP8266
+#include <ESP8266WiFi.h>
+#endif  // ARDUINO_ARCH_ESP8266
+
+#ifdef ARDUINO_ARCH_ESP32
 #include <WiFi.h>
+#endif  // ARDUINO_ARCH_ESP32
 #include <AsyncMqttClient.h>
 #include <HaDiscovery.h>
 #include <transport/AsyncMqttClientTransport.h>
