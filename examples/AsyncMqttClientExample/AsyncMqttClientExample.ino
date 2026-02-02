@@ -19,16 +19,20 @@ const char* mqtt_pass = "your-mqtt-password";
 AsyncMqttClient mqtt;
 AsyncMqttClientTransport transport(mqtt);
 HaDiscovery ha(transport);
+JBLogger log("Main");
 
 void setup() {
   Serial.begin(115200);
+  log.setLogLevel(LOG_LEVEL_DEBUG);
   ha.setLogLevel(LOG_LEVEL_DEBUG);
+
+  log.info("Connecting to WiFi...");
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
   }
+  log.info("WiFi connected");
 
   String mac = WiFi.macAddress();
   mac.replace(":", "");

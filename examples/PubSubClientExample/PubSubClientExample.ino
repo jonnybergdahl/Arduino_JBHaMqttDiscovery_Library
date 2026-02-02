@@ -20,16 +20,20 @@ WiFiClient wifi;
 PubSubClient mqtt(wifi);
 PubSubClientTransport transport(mqtt);
 HaDiscovery ha(transport, "homeassistant", "devices");
+JBLogger log("Main");
 
 void setup() {
   Serial.begin(115200);
+  log.setLogLevel(LOG_LEVEL_DEBUG);
   ha.setLogLevel(LOG_LEVEL_DEBUG);
+
+  log.info("Connecting to WiFi...");
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
   }
+  log.info("WiFi connected");
 
   String mac = WiFi.macAddress();
   mac.replace(":", "");
