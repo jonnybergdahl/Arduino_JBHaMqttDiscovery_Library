@@ -67,6 +67,14 @@ struct HaDeviceInfo {
    * It should be stable across reboots/flashes to avoid device duplication.
    */
   const char* identifiers = nullptr;
+
+  /**
+   * @brief Optional URL for the device's web interface, e.g. "http://192.168.1.50/".
+   *
+   * Home Assistant shows it as a "Visit" link on the device page. Sent as `dev.cu`
+   * (`configuration_url`). Must be an http(s) URL, or a `homeassistant://` path.
+   */
+  const char* configuration_url = nullptr;
 };
 
 /**
@@ -507,6 +515,7 @@ private:
     std::string model;
     std::string sw_version;
     std::string identifiers;
+    std::string configuration_url;
   };
 
   static void onTransportConnectThunk(void* ctx);

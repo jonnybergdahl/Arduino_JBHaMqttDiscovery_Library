@@ -42,6 +42,9 @@ public:
   /** @brief How long a connect attempt may take before tick() gives up on it. */
   static constexpr uint32_t CONNECT_TIMEOUT_MS = 15000;
 
+  /** @brief reconnectNow() drops a pending attempt only if it's older than this. */
+  static constexpr uint32_t STALE_ATTEMPT_MS = 2000;
+
   /**
    * @brief Construct an AsyncMqttClient transport adapter.
    *
@@ -96,6 +99,7 @@ public:
       client.setClientId(clientIdStr.c_str());
     }
     started = true;
+    takeReconnectRequest();  // this is the attempt a pending request asked for
     startAttempt();
     return true;
   }
@@ -122,9 +126,9 @@ public:
     }
 
     if (takeReconnectRequest() && !isConnected) {
-      if (connecting) {
+      if (connecting && static_cast<int32_t>(now - attemptStartedAt) >= static_cast<int32_t>(STALE_ATTEMPT_MS)) {
         // An attempt started while the network was down may never call back,
-        // so drop it instead of waiting for the timeout
+        // so drop it instead of waiting for the timeout. A fresh one is left alone.
         if (log) log->info("Async reconnect requested, dropping the current attempt");
         connecting = false;
         attemptFailed = true;  // a late onDisconnect for it isn't a new failure

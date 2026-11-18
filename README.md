@@ -195,6 +195,26 @@ void setup() {
 
 Commands are queued when they arrive and the handler is called from `ha.tick()`, so it always runs in `loop()`, with both MQTT clients.
 
+## Device info
+
+`setDevice()` takes the device details Home Assistant shows on the device page:
+
+```c++
+ha.setDevice({
+  .node_id = nodeId.c_str(),            // required, letters, digits, '_' and '-'
+  .name = "Office Node",
+  .manufacturer = "YourBrand",
+  .model = "ESP32",
+  .sw_version = "1.0.0",
+  .identifiers = mac.c_str(),           // stable id, defaults to node_id
+  .configuration_url = "http://192.168.1.50/"  // optional "Visit" link
+});
+```
+
+`configuration_url` adds a **Visit** link on the device page, e.g. to the device's own web interface.
+It must be an `http://` or `https://` URL, or a `homeassistant://` path.
+The strings are copied, so they can be local variables.
+
 ## Entity names and IDs
 
 Home Assistant shows entities with the device name in front.

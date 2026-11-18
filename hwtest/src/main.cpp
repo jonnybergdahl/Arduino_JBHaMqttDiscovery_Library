@@ -193,6 +193,8 @@ void handleSerial() {
 
 void setup() {
   Serial.begin(115200);
+  // Drop output when no one reads the USB port, instead of blocking loop()
+  Serial.setTxTimeoutMs(0);
   unsigned long start = millis();
   while (!Serial && millis() - start < 3000) {}
   delay(500);
@@ -243,6 +245,7 @@ void setup() {
   mac.toLowerCase();
   nodeId = std::string("jbhatest_") + mac.c_str();
   altAvailTopic = "devices/" + nodeId + "/alt_status";
+  std::string visitUrl = std::string("http://") + WiFi.localIP().toString().c_str() + "/";
 
   ha.setDevice({
     .node_id = nodeId.c_str(),
@@ -250,7 +253,8 @@ void setup() {
     .manufacturer = "Unexpected Maker",
     .model = "TinyS3",
     .sw_version = kTransportName,
-    .identifiers = mac.c_str()
+    .identifiers = mac.c_str(),
+    .configuration_url = visitUrl.c_str()
   });
   ha.onCommand(onCommand);
 

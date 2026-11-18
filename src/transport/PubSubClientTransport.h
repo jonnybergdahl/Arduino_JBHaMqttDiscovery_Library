@@ -92,6 +92,7 @@ public:
     if (clientId != clientIdStr.c_str()) {
       clientIdStr = clientId;
     }
+    takeReconnectRequest();  // this is the attempt a pending request asked for
 
     const char* user = userStr.empty() ? nullptr : userStr.c_str();
     const char* pass = passStr.empty() ? nullptr : passStr.c_str();

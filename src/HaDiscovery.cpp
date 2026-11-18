@@ -61,6 +61,7 @@ void HaDiscovery::setDevice(const HaDeviceInfo& dev) {
   _device.model = copy(dev.model);
   _device.sw_version = copy(dev.sw_version);
   _device.identifiers = copy(dev.identifiers);
+  _device.configuration_url = copy(dev.configuration_url);
 
   if (!hasDevice()) {
     return;
@@ -645,6 +646,9 @@ void HaDiscovery::addDeviceObject(JsonDocument& doc) const {
   }
   if (!_device.sw_version.empty()) {
     dev["sw"] = _device.sw_version;
+  }
+  if (!_device.configuration_url.empty()) {
+    dev["cu"] = _device.configuration_url;
   }
 }
 

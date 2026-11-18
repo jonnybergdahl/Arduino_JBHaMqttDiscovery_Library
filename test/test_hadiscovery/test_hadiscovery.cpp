@@ -132,6 +132,7 @@ void setUp(void) {
     dev.manufacturer = "Manufacturer";
     dev.model = "Model X";
     dev.sw_version = "1.0.0";
+    dev.configuration_url = "http://test.local/";
     discovery->setDevice(dev);
 }
 
@@ -184,6 +185,7 @@ void test_sensor_component(void) {
     TEST_ASSERT_EQUAL_STRING("Manufacturer", doc["dev"]["mf"]);
     TEST_ASSERT_EQUAL_STRING("Model X", doc["dev"]["mdl"]);
     TEST_ASSERT_EQUAL_STRING("1.0.0", doc["dev"]["sw"]);
+    TEST_ASSERT_EQUAL_STRING("http://test.local/", doc["dev"]["cu"]);
     TEST_ASSERT_EQUAL_STRING("devices/test_node/status", doc["avty_t"]);
     TEST_ASSERT_EQUAL_STRING("online", doc["pl_avail"]);
     TEST_ASSERT_EQUAL_STRING("offline", doc["pl_not_avail"]);
@@ -388,6 +390,7 @@ void test_device_strings_are_copied(void) {
     TEST_ASSERT_EQUAL_STRING("temp_node_temp", doc["cmps"]["temp"]["uniq_id"]);
     TEST_ASSERT_EQUAL_STRING("temp_mac", doc["dev"]["ids"][0]);
     TEST_ASSERT_TRUE(doc["dev"]["name"].isNull());
+    TEST_ASSERT_FALSE(doc["dev"]["cu"].is<const char*>());  // not set: left out
 }
 
 void test_no_device_publishes_nothing(void) {
