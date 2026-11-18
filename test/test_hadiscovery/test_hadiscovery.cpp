@@ -83,6 +83,9 @@ public:
     void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) override {}
     void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") override {}
 
+    // Expose the protected request flag for tests
+    bool takeRequest() { return takeReconnectRequest(); }
+
     void clear() {
         messages.clear();
         subscriptions.clear();
@@ -653,7 +656,7 @@ void test_birth_offline_ignored(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Removal and migration
+// Removal
 // ---------------------------------------------------------------------------
 
 void test_remove_entity_sends_stub_then_omits(void) {
@@ -746,50 +749,6 @@ void test_remove_device_while_disconnected(void) {
     TEST_ASSERT_TRUE(msgs[0].payload.empty());
 }
 
-void test_migration_from_legacy_topics(void) {
-    discovery->setMigrateLegacyDiscovery(true, 0);
-    addSensor("temp");
-    HaSwitchConfig sw;
-    sw.common.object_id = "relay";
-    discovery->publishSwitchDiscovery(sw);
-    discovery->tick();
-
-    const char* legacySensor = "homeassistant/sensor/test_node/temp/config";
-    const char* legacySwitch = "homeassistant/switch/test_node/relay/config";
-
-    // migrate_discovery first, then the device payload
-    std::vector<MockTransport::Message> sensorMsgs = transport.on(legacySensor);
-    TEST_ASSERT_TRUE(sensorMsgs.size() >= 1);
-    JsonDocument migrate;
-    deserializeJson(migrate, sensorMsgs[0].payload);
-    TEST_ASSERT_TRUE(migrate["migrate_discovery"].as<bool>());
-    TEST_ASSERT_TRUE(sensorMsgs[0].retained);
-    TEST_ASSERT_TRUE(transport.indexOf(legacySensor) < transport.indexOf(kDeviceTopic));
-    TEST_ASSERT_TRUE(transport.indexOf(legacySwitch) < transport.indexOf(kDeviceTopic));
-
-    // With a 0 ms delay the old topics are cleared in the same tick
-    sensorMsgs = transport.on(legacySensor);
-    TEST_ASSERT_EQUAL(2, sensorMsgs.size());
-    TEST_ASSERT_TRUE(sensorMsgs[1].payload.empty());
-    TEST_ASSERT_TRUE(sensorMsgs[1].retained);
-    TEST_ASSERT_EQUAL(2, transport.on(legacySwitch).size());
-
-    // Only once
-    transport.clear();
-    transport.fireConnect();
-    discovery->tick();
-    TEST_ASSERT_EQUAL(0, transport.on(legacySensor).size());
-}
-
-void test_migration_waits_before_clearing(void) {
-    discovery->setMigrateLegacyDiscovery(true, 60000);
-    addSensor("temp");
-    discovery->tick();
-    std::vector<MockTransport::Message> msgs = transport.on("homeassistant/sensor/test_node/temp/config");
-    TEST_ASSERT_EQUAL(1, msgs.size());
-    TEST_ASSERT_FALSE(msgs[0].payload.empty());
-}
-
 // ---------------------------------------------------------------------------
 // Reconnect backoff
 // ---------------------------------------------------------------------------
@@ -821,6 +780,13 @@ void test_reconnect_backoff(void) {
 
     b.enabled = false;
     TEST_ASSERT_FALSE(b.due(20000));
+}
+
+void test_reconnect_now_sets_request_once(void) {
+    TEST_ASSERT_FALSE(transport.takeRequest());
+    transport.reconnectNow();
+    TEST_ASSERT_TRUE(transport.takeRequest());
+    TEST_ASSERT_FALSE(transport.takeRequest());
 }
 
 void test_reconnect_backoff_wraps(void) {
@@ -869,10 +835,9 @@ static void runAll() {
     RUN_TEST(test_readd_before_tick_cancels_removal);
     RUN_TEST(test_remove_device);
     RUN_TEST(test_remove_device_while_disconnected);
-    RUN_TEST(test_migration_from_legacy_topics);
-    RUN_TEST(test_migration_waits_before_clearing);
     RUN_TEST(test_reconnect_backoff);
     RUN_TEST(test_reconnect_backoff_wraps);
+    RUN_TEST(test_reconnect_now_sets_request_once);
 }
 
 // Support for native environment where setup/loop might not be enough for unity runner

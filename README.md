@@ -147,6 +147,17 @@ Change the delays with `transport.setAutoReconnect(true, minMs, maxMs)`, or turn
 
 > With PubSubClient each attempt blocks `loop()` until the broker answers or the attempt times out.
 
+The transport doesn't know when Wi-Fi comes back, so after an outage it waits for the next scheduled attempt (up to 60 seconds).
+Call `transport.reconnectNow()` from the Wi-Fi "got IP" event to reconnect right away; it's safe to call from the event callback:
+
+```c++
+// ESP32
+WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) { transport.reconnectNow(); }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+
+// ESP8266 (keep the handler, or the event is unregistered)
+WiFiEventHandler gotIpHandler = WiFi.onStationModeGotIP([](const WiFiEventStationModeGotIP&) { transport.reconnectNow(); });
+```
+
 The library keeps your entities and the last state of each one, and sends them again:
 
 - every time the MQTT connection comes up, and
@@ -283,16 +294,3 @@ Removing the last entity also clears the device discovery topic.
 `removeDevice()` publishes an empty retained payload on the device discovery topic, which removes the device and all its entities.
 
 > Deleting an MQTT entity in Home Assistant doesn't stop the device from announcing it, so it comes back. Remove it in the firmware instead.
-
-## Migrating from older versions
-
-Older versions of this library published one discovery topic per entity (`homeassistant/<component>/<node_id>/<object_id>/config`).
-To move those entities to device discovery without losing their entity IDs, names and history, turn on migration for one boot:
-
-```c++
-ha.setMigrateLegacyDiscovery(true);
-```
-
-The first device payload then follows Home Assistant's migration steps.
-It publishes `{"migrate_discovery": true}` to each entity's old topic, then the device payload, and clears the old topics 5 seconds later.
-Check the Home Assistant log for the migration messages, then remove the call again.

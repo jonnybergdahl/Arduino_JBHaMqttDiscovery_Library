@@ -220,6 +220,19 @@ public:
   }
 
   /**
+   * @brief Try to reconnect on the next tick(), without waiting for the backoff delay.
+   *
+   * Call this when the network comes back, e.g. from the Wi-Fi "got IP" event, so the
+   * transport doesn't wait for the next scheduled attempt (up to the maximum delay).
+   * It also resets the delay. Safe to call from another task or an event callback;
+   * it only sets a flag. Does nothing before the first connect(), while connected,
+   * or when automatic reconnect is off.
+   */
+  void reconnectNow() {
+    reconnectRequested = true;
+  }
+
+  /**
    * @brief Set the logger for this transport.
    *
    * @param logger Pointer to a JBLogger instance.
@@ -232,5 +245,19 @@ protected:
   JBLogger* log = nullptr;
   /** @brief Reconnect timing, used by tick() in the transports. */
   ReconnectBackoff reconnect;
+
+  /**
+   * @brief Return and clear a pending reconnectNow() request. Called from tick().
+   */
+  bool takeReconnectRequest() {
+    if (!reconnectRequested) {
+      return false;
+    }
+    reconnectRequested = false;
+    return true;
+  }
+
+private:
+  volatile bool reconnectRequested = false;
 };
 /** @} */

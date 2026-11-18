@@ -33,7 +33,6 @@
  *   and when Home Assistant comes back online (birth message on `<discovery_prefix>/status`)
  * - Provides default topic conventions with per-entity overrides
  * - Removes single entities or the whole device
- * - Can migrate entities published with the older per-entity discovery topics
  *
  * @{
  */
@@ -292,24 +291,6 @@ public:
   void setOrigin(const char* name, const char* sw_version = nullptr, const char* url = nullptr);
 
   /**
-   * @brief Migrate entities published by older versions of this library.
-   *
-   * Older versions published one discovery topic per entity
-   * (`<discovery_prefix>/<component>/<node_id>/<object_id>/config`). When this is on,
-   * the first device payload after boot follows Home Assistant's migration steps:
-   * it publishes `{"migrate_discovery": true}` to each entity's old topic, then the
-   * device payload, and clears the old topics a few seconds later. The entities keep
-   * their entity IDs, names and history.
-   *
-   * Turn it on for one boot on devices that ran an older version, then turn it off
-   * again. Call it before the first tick() after connecting.
-   *
-   * @param enable       Whether to migrate
-   * @param clearDelayMs Wait between the device payload and clearing the old topics (default 5 s)
-   */
-  void setMigrateLegacyDiscovery(bool enable, uint32_t clearDelayMs = 5000);
-
-  /**
    * @brief Periodic processing hook. Call this from loop().
    *
    * It drives the transport (connection changes and reconnect), handles queued
@@ -528,8 +509,6 @@ private:
     std::string identifiers;
   };
 
-  enum class MigrationState { Off, Pending, WaitingToClear, Done };
-
   static void onTransportConnectThunk(void* ctx);
   void onTransportConnect();
   static void onTransportMessageThunk(void* ctx, const char* topic, const uint8_t* payload, size_t len);
@@ -542,7 +521,6 @@ private:
   void subscribeAll();
 
   std::string buildDeviceTopic() const;
-  std::string buildLegacyConfigTopic(const std::string& component, const std::string& object_id) const;
   std::string buildDefaultStateTopic(const char* object_id) const;
   std::string buildDefaultCommandTopic(const char* object_id) const;
   std::string buildDefaultAvailabilityTopic() const;
@@ -551,8 +529,6 @@ private:
   bool addComponent(const char* component, const char* object_id, std::string json);
   std::string buildDevicePayload(bool withRemovalStubs) const;
   void publishDevicePayload();
-  void runMigrationStart();
-  void runMigrationClear();
   bool publishRetained(const std::string& topic, const std::string& payload, uint8_t qos);
   bool canPublishStateNow() const;
 
@@ -596,11 +572,6 @@ private:
   bool _republishPending = false;
   uint32_t _republishAt = 0;
   uint32_t _republishDelayMaxMs = 5000;
-
-  MigrationState _migration = MigrationState::Off;
-  uint32_t _migrationClearAt = 0;
-  uint32_t _migrationClearDelayMs = 5000;
-  std::vector<std::string> _legacyTopics;
 };
 
 /** @} */

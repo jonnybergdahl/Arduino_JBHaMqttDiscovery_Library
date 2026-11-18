@@ -235,6 +235,10 @@ public:
     }
     wasConnected = nowConnected;
 
+    if (takeReconnectRequest() && !nowConnected) {
+      reconnect.reset(now);
+    }
+
     if (!nowConnected && !clientIdStr.empty() && reconnect.due(now)) {
       if (log) log->info("PubSub reconnecting");
       connect(clientIdStr.c_str());

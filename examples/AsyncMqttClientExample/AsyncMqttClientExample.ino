@@ -25,6 +25,20 @@ AsyncMqttClientTransport transport(mqtt);
 HaDiscovery ha(transport);
 JBLogger logger("Main");
 
+// Reconnect MQTT right away when Wi-Fi comes back, instead of waiting for the next retry
+#ifdef ARDUINO_ARCH_ESP8266
+WiFiEventHandler gotIpHandler;
+#endif
+
+void watchWiFi() {
+#ifdef ARDUINO_ARCH_ESP8266
+  gotIpHandler = WiFi.onStationModeGotIP([](const WiFiEventStationModeGotIP&) { transport.reconnectNow(); });
+#endif
+#ifdef ARDUINO_ARCH_ESP32
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) { transport.reconnectNow(); }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+#endif
+}
+
 // Called when Home Assistant sends a command to a switch or button
 void onCommand(const char* objectId, const char* payload) {
   logger.info("Command for %s: %s", objectId, payload);
@@ -41,6 +55,7 @@ void setup() {
   ha.setLogLevel(LOG_LEVEL_DEBUG);
 
   logger.info("Connecting to WiFi...");
+  watchWiFi();
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {

@@ -32,7 +32,7 @@ publishBinarySensorDiscovery	KEYWORD2
 publishButtonDiscovery	KEYWORD2
 removeEntity	KEYWORD2
 removeDevice	KEYWORD2
-setMigrateLegacyDiscovery	KEYWORD2
 setAutoReconnect	KEYWORD2
+reconnectNow	KEYWORD2
 publishState	KEYWORD2
 publishStateSwitch	KEYWORD2

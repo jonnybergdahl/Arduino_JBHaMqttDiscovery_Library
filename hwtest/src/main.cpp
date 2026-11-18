@@ -220,6 +220,7 @@ void setup() {
   }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) {
     logger.info("Wi-Fi got IP %s", WiFi.localIP().toString().c_str());
+    transport.reconnectNow();
   }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
 #ifdef WIFI_LOW_TX_POWER
@@ -252,10 +253,6 @@ void setup() {
     .identifiers = mac.c_str()
   });
   ha.onCommand(onCommand);
-#ifdef MIGRATE
-  logger.info("Migration from per-entity topics is ON");
-  ha.setMigrateLegacyDiscovery(true);
-#endif
 
   transport.setServer(MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS);
   transport.connect(nodeId.c_str());

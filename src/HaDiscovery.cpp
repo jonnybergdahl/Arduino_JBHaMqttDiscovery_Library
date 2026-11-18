@@ -27,7 +27,6 @@ static const char* kAvailOffline = "offline";
 static const char* kOn = "ON";
 static const char* kOff = "OFF";
 static const char* kPress = "PRESS";
-static const char* kMigratePayload = "{\"migrate_discovery\":true}";
 
 static bool isDue(uint32_t now, uint32_t at) {
   return static_cast<int32_t>(now - at) >= 0;
@@ -103,11 +102,6 @@ void HaDiscovery::setRepublishDelay(uint32_t maxDelayMs) {
   _republishDelayMaxMs = maxDelayMs;
 }
 
-void HaDiscovery::setMigrateLegacyDiscovery(bool enable, uint32_t clearDelayMs) {
-  _migration = enable ? MigrationState::Pending : MigrationState::Off;
-  _migrationClearDelayMs = clearDelayMs;
-}
-
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -134,10 +128,6 @@ void HaDiscovery::tick() {
   } else if (_republishPending && isDue(now, _republishAt)) {
     _republishPending = false;
     republishAll();
-  }
-
-  if (_migration == MigrationState::WaitingToClear && isDue(now, _migrationClearAt)) {
-    runMigrationClear();
   }
 }
 
@@ -528,10 +518,6 @@ void HaDiscovery::publishDevicePayload() {
     return;
   }
 
-  if (_migration == MigrationState::Pending && !_components.empty()) {
-    runMigrationStart();
-  }
-
   std::string topic = buildDeviceTopic();
 
   if (!_removed.empty()) {
@@ -612,46 +598,12 @@ bool HaDiscovery::publishRetained(const std::string& topic, const std::string& p
 }
 
 // ---------------------------------------------------------------------------
-// Migration from per-entity discovery topics
-// ---------------------------------------------------------------------------
-
-void HaDiscovery::runMigrationStart() {
-#ifdef HAS_LOG
-  _log.info("Migrating %u entities from per-entity discovery topics", (unsigned)_components.size());
-#endif
-  _legacyTopics.clear();
-  for (const Component& c : _components) {
-    std::string topic = buildLegacyConfigTopic(c.component, c.object_id);
-    publishRetained(topic, kMigratePayload, 1);
-    _legacyTopics.push_back(topic);
-  }
-  _migration = MigrationState::WaitingToClear;
-  _migrationClearAt = nowMs() + _migrationClearDelayMs;
-}
-
-void HaDiscovery::runMigrationClear() {
-#ifdef HAS_LOG
-  _log.info("Clearing %u old per-entity discovery topics", (unsigned)_legacyTopics.size());
-#endif
-  for (const std::string& topic : _legacyTopics) {
-    publishRetained(topic, std::string(), 1);
-  }
-  _legacyTopics.clear();
-  _migration = MigrationState::Done;
-}
-
-// ---------------------------------------------------------------------------
 // Topics
 // ---------------------------------------------------------------------------
 
 std::string HaDiscovery::buildDeviceTopic() const {
   // homeassistant/device/<node_id>/config
   return _discoveryPrefix + "/device/" + _device.node_id + "/config";
-}
-
-std::string HaDiscovery::buildLegacyConfigTopic(const std::string& component, const std::string& object_id) const {
-  // homeassistant/<component>/<node_id>/<object_id>/config, used by older versions
-  return _discoveryPrefix + "/" + component + "/" + _device.node_id + "/" + object_id + "/config";
 }
 
 std::string HaDiscovery::buildDefaultStateTopic(const char* object_id) const {

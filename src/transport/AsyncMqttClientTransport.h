@@ -121,6 +121,18 @@ public:
       }
     }
 
+    if (takeReconnectRequest() && !isConnected) {
+      if (connecting) {
+        // An attempt started while the network was down may never call back,
+        // so drop it instead of waiting for the timeout
+        if (log) log->info("Async reconnect requested, dropping the current attempt");
+        connecting = false;
+        attemptFailed = true;  // a late onDisconnect for it isn't a new failure
+        client.disconnect(true);
+      }
+      reconnect.reset(now);
+    }
+
     if (connecting && static_cast<int32_t>(now - attemptStartedAt) >= static_cast<int32_t>(CONNECT_TIMEOUT_MS)) {
       // No onConnect or onDisconnect came: reset the client so connect() works again
       if (log) log->error("Async connect timed out, resetting the client");
