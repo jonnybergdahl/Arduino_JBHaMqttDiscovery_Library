@@ -25,7 +25,7 @@ Add the library and one MQTT client to `platformio.ini`:
 
 ```ini
 lib_deps =
-    jonnybergdahl/JBHaMqttDiscovery@^1.0.0
+    jonnybergdahl/JBHaMqttDiscovery@^1.1.0
     bertmelis/espMqttClient
 ```
 
@@ -33,7 +33,7 @@ lib_deps =
 >
 > ```ini
 > lib_deps =
->     https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git#v1.0.0
+>     https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git#v1.1.0
 >     bertmelis/espMqttClient
 > ```
 
@@ -164,7 +164,9 @@ Who runs the client's `loop()` depends on the client:
 - `espMqttClientAsync`: its network callbacks do. On ESP8266, use `EspMqttClientTransport<espMqttClientAsync> transport(mqtt, false);`.
 
 > The transport takes over espMqttClient's `onConnect`, `onDisconnect` and `onMessage` callbacks.
-> espMqttClient refuses to publish when free heap drops below 16 KB (`EMC_MIN_FREE_MEMORY`); the transport logs it as a failed publish.
+> espMqttClient refuses to publish while the largest free block of heap is below `EMC_MIN_FREE_MEMORY` (16 KB by default); the transport logs it as a failed publish.
+> An ESP8266 seldom has 16 KB in one block, so lower it with a build flag, for example `-D EMC_MIN_FREE_MEMORY=4096` in `build_flags` in PlatformIO.
+> Keep the largest free block bigger than the device payload, which is sent in one piece.
 
 ### AsyncMqttClient (event-driven, no polling required)
 ```c++
@@ -261,6 +263,8 @@ So you can publish them in `setup()` right after `connect()`, even with AsyncMqt
 
 Call `ha.republishAll()` to send everything again yourself.
 
+If the MQTT client doesn't accept the device payload or `online` (for example when it's short of memory), the library tries again from `ha.tick()` after 1 second, doubling up to 30 seconds, and holds the states until it gets through.
+
 > Each entity is kept in RAM (about 150–250 bytes each).
 > With PubSubClient the transport's buffer also grows to fit the whole device payload (about 3.7 KB for 14 entities).
 > On an ESP8266 that's about 6 KB of heap for 14 entities; keep an eye on free heap if you add many more.
@@ -289,6 +293,21 @@ void setup() {
 ```
 
 Commands are queued when they arrive and the handler is called from `ha.tick()`, so it always runs in `loop()`, with both MQTT clients.
+
+### Raw messages and your own topics
+
+If your firmware already handles its own MQTT commands, or listens on topics that don't belong to an entity, use `onMessage()`.
+It gets the topic and the payload as they arrived, for entity commands (before `onCommand()`) and for topics added with `subscribe()`:
+
+```c++
+ha.subscribe("myfirmware/office/ota/#");   // subscribed again after every reconnect
+ha.onMessage([](const char* topic, const char* payload) {
+  handleMyMessage(topic, payload);
+});
+```
+
+The transport takes over the MQTT client's message callback, so subscribe through `ha.subscribe()`, not the client.
+Don't let a subscription overlap the entities' command topics: some brokers then deliver a message once per matching subscription.
 
 ## Device info
 
@@ -329,6 +348,26 @@ HaSensorConfig temp{
   .device_class="temperature"
 };
 ```
+
+### Shared state topics and unique IDs
+
+Several entities can read their state from one JSON message. Point them at the same topic with `state_topic_override`, pick the value with `value_template`, and publish the JSON with `publishStateTopic()`:
+
+```c++
+HaSensorConfig rssi{
+  .common = { .object_id="rssi", .name="RSSI",
+              .state_topic_override="office/diagnostics",
+              .value_template="{{ value_json.rssi }}" }
+};
+ha.publishSensorDiscovery(rssi);
+
+ha.publishStateTopic("office/diagnostics", "{\"rssi\":-52,\"ram\":201728}");
+```
+
+Like `publishState()`, `publishStateTopic()` keeps the last payload and sends it again on connect and after a Home Assistant restart.
+`publishState()` also uses the entity's `state_topic_override` when it has one.
+
+The unique ID is `<node_id>_<object_id>`. Set `.unique_id` to keep the unique ID an entity already has, e.g. when moving to this library from other discovery code; see [Moving from single-component discovery](#moving-from-single-component-discovery).
 
 ## Entity category and expiry
 
@@ -462,7 +501,7 @@ ha.publishState("message", "Hello");
 
 ### Light
 
-Uses Home Assistant's JSON schema, so all light commands arrive on one topic as JSON.
+Uses Home Assistant's JSON schema by default, so all light commands arrive on one topic as JSON.
 `color_mode` is `OnOff`, `Brightness` (default), `ColorTemp` (kelvin) or `Rgb`.
 
 ```c++
@@ -488,6 +527,18 @@ void onCommand(const char* objectId, const char* payload) {
     }
   }
 }
+```
+
+With `.schema = HaLightSchema::Default`, the light uses Home Assistant's default schema instead, with separate topics: `.../state` and `.../set` for on/off, `.../brightness` and `.../brightness/set`, `.../rgb` and `.../rgb/set` (`r,g,b`), and `.../color_temp` and `.../color_temp/set` (kelvin).
+Use it when the firmware already has those topics; each one can be changed with the `*_topic_override` fields.
+The library turns the commands into the same JSON as above, so `parseLightCommand()` and `publishStateLight()` work the same way.
+
+```c++
+HaLightConfig display{
+  .common = { .object_id="display", .name="Display" },
+  .brightness_scale=100,
+  .schema=HaLightSchema::Default
+};
 ```
 
 ### Cover
@@ -524,3 +575,56 @@ Removing the last entity also clears the device discovery topic.
 `removeDevice()` publishes an empty retained payload on the device discovery topic, which removes the device and all its entities.
 
 > Deleting an MQTT entity in Home Assistant doesn't stop the device from announcing it, so it comes back. Remove it in the firmware instead.
+
+## Other availability topic
+
+Availability is on `<base>/<node_id>/status` by default. To use another topic, e.g. one your firmware already has, call `setAvailabilityTopic()` before connecting:
+
+```c++
+ha.setAvailabilityTopic("myfirmware/office/availability");
+```
+
+It's used for the Last Will, for `online`/`offline` and in the device payload.
+
+## Moving from single-component discovery
+
+Older firmware often publishes one discovery message per entity, on `homeassistant/<component>/<node_id>/<object_id>/config`.
+If those are still retained on the broker, Home Assistant keeps those entities, and ignores entities in the device payload with the same unique ID.
+
+Call `ha.migrateEntityDiscovery()` before connecting, and give the entities the unique IDs they had (`.unique_id`).
+After every connect, the library then waits for the retained messages on `homeassistant/+/<node_id>/+/config`, and follows Home Assistant's migration steps for each one.
+To know when they're all in, it also publishes a message to `<base>/<node_id>/migration_sync`, which it subscribes to as well. The broker sends that back after the retained messages. This usually takes well under a second; the library gives up waiting after 10 seconds.
+
+1. Publishes `{"migrate_discovery": true}` to the old topic. Home Assistant unloads the entity, but keeps its settings.
+2. Publishes the device payload, which loads the entity again.
+3. Clears the old topic 5 seconds later.
+
+The entities keep their entity IDs, history and settings. Once the old topics are cleared, nothing more happens, so it's fine to leave it on; the only cost is the short wait after each connect.
+
+Only old configs whose unique ID matches an entity in the device payload are migrated, so add the entities before connecting.
+The others are left alone, with a warning in the log: Home Assistant then shows the old entity next to the new one, which you can fix by correcting `.unique_id`.
+Migrating them would unload the old entity with nothing to load it again.
+
+> Check the unique IDs against the old firmware before flashing a real device, e.g. the `uniq_id` in the old discovery payloads on the broker.
+
+## Using a client your firmware already connects
+
+With PubSubClient, the library can work with a client your firmware already sets up, connects and reconnects itself, e.g. when adding the library to existing firmware:
+
+```c++
+PubSubClientTransport transport(mqtt);   // mqtt: your PubSubClient
+HaDiscovery ha(transport, "homeassistant", "myfirmware");
+
+transport.setAutoReconnect(false);                   // your firmware reconnects
+ha.setAvailabilityTopic("myfirmware/office/status"); // the topic of your Last Will
+ha.setDevice({ ... });
+ha.onMessage(myMessageHandler);                      // the transport takes over the client's callback
+```
+
+Then call `mqtt.loop()` and `ha.tick()` from `loop()`; `tick()` notices when your firmware has connected.
+Since the transport's `setServer()` and `connect()` aren't used:
+
+- The Last Will set by `setDevice()` isn't sent. Connect with your own will on the same topic as `setAvailabilityTopic()`, with the payload `offline`, retained.
+- The buffer isn't raised to 2048 bytes up front. It still grows when a publish needs more, but incoming messages must fit the size your firmware set with `mqtt.setBufferSize()`.
+- Subscribe through `ha.subscribe()`, not the client, so the subscriptions come back after a reconnect.
+

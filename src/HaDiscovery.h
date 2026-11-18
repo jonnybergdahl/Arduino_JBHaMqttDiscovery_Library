@@ -16,7 +16,7 @@
 /** @brief Library name, sent as the default origin name. */
 #define JBHAMQTTDISCOVERY_NAME "JBHaMqttDiscovery"
 /** @brief Library version, sent as the default origin version. Keep in sync with library.properties. */
-#define JBHAMQTTDISCOVERY_VERSION "1.0.0"
+#define JBHAMQTTDISCOVERY_VERSION "1.1.0"
 /** @brief Library URL, sent as the default origin support URL. */
 #define JBHAMQTTDISCOVERY_URL "https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery"
 
@@ -36,6 +36,7 @@
  *   and when Home Assistant comes back online (birth message on `<discovery_prefix>/status`)
  * - Provides default topic conventions with per-entity overrides
  * - Removes single entities or the whole device
+ * - Can take over entities from older single-component discovery topics
  *
  * @{
  */
@@ -151,6 +152,25 @@ struct HaEntityCommon {
    * the library leaves it out there and logs a warning.
    */
   HaEntityCategory entity_category = HaEntityCategory::None;
+
+  /**
+   * @brief Optional template that picks the state out of the state payload (sent as `val_tpl`).
+   *
+   * Use it when several entities share one JSON state topic, e.g.
+   * `"{{ value_json.temperature }}"` together with state_topic_override.
+   * For a light with HaLightSchema::Default it's sent as `stat_val_tpl` and applies to the
+   * on/off state only. It's left out for buttons and JSON schema lights, which have no use for it.
+   */
+  const char* value_template = nullptr;
+
+  /**
+   * @brief Optional unique_id for Home Assistant. If nullptr, `<node_id>_<object_id>` is used.
+   *
+   * Home Assistant identifies an entity by its unique_id. Set this to keep the unique_id an
+   * entity already has, e.g. when moving from other discovery code to this library,
+   * so Home Assistant keeps the entity, its history and its settings.
+   */
+  const char* unique_id = nullptr;
 };
 
 /**
@@ -341,11 +361,29 @@ enum class HaLightColorMode : uint8_t {
 };
 
 /**
+ * @brief How a light talks MQTT.
+ */
+enum class HaLightSchema : uint8_t {
+  Json,    ///< One command and one state topic with JSON payloads (default)
+  Default  ///< Home Assistant's "default" schema: separate topics for state, brightness, color and color temperature
+};
+
+/**
  * @brief Configuration for a Home Assistant MQTT Discovery light.
  *
- * Uses Home Assistant's JSON schema: commands arrive in the onCommand() handler as JSON,
+ * With the JSON schema (the default), commands arrive in the onCommand() handler as JSON,
  * e.g. `{"state":"ON","brightness":128}`. Decode them with HaDiscovery::parseLightCommand()
  * and report the state with HaDiscovery::publishStateLight().
+ *
+ * With HaLightSchema::Default, the light has separate topics:
+ * - on/off: `<base>/<node_id>/<object_id>/state` and `.../set` ("ON"/"OFF")
+ * - brightness: `.../brightness` and `.../brightness/set` (a number, 0..brightness_scale)
+ * - RGB color: `.../rgb` and `.../rgb/set` ("r,g,b", e.g. "255,0,127")
+ * - color temperature: `.../color_temp` and `.../color_temp/set` (kelvin)
+ *
+ * Only the topics the color_mode needs are used. The library turns commands on any of
+ * them into the same JSON as the JSON schema before passing them to onCommand(), so
+ * parseLightCommand() and publishStateLight() work the same for both schemas.
  */
 struct HaLightConfig {
   HaEntityCommon common;
@@ -364,6 +402,27 @@ struct HaLightConfig {
 
   /** @brief Coldest color temperature in kelvin, for ColorTemp (default 6500). */
   uint16_t max_kelvin = 6500;
+
+  /** @brief JSON (default) or Home Assistant's default schema with separate topics. */
+  HaLightSchema schema = HaLightSchema::Json;
+
+  /** @brief Default schema: optional override for the brightness state topic. */
+  const char* brightness_state_topic_override = nullptr;
+
+  /** @brief Default schema: optional override for the brightness command topic. */
+  const char* brightness_command_topic_override = nullptr;
+
+  /** @brief Default schema: optional override for the RGB state topic. */
+  const char* rgb_state_topic_override = nullptr;
+
+  /** @brief Default schema: optional override for the RGB command topic. */
+  const char* rgb_command_topic_override = nullptr;
+
+  /** @brief Default schema: optional override for the color temperature state topic. */
+  const char* color_temp_state_topic_override = nullptr;
+
+  /** @brief Default schema: optional override for the color temperature command topic. */
+  const char* color_temp_command_topic_override = nullptr;
 };
 
 /**
@@ -440,6 +499,14 @@ struct HaCoverConfig {
 using HaCommandCallback = std::function<void(const char* object_id, const char* payload)>;
 
 /**
+ * @brief Handler for incoming MQTT messages, with the topic they arrived on.
+ *
+ * @param topic   The topic
+ * @param payload The payload, null-terminated
+ */
+using HaMessageCallback = std::function<void(const char* topic, const char* payload)>;
+
+/**
  * @brief Home Assistant MQTT device discovery publisher (transport-agnostic).
  *
  * Typical usage:
@@ -509,6 +576,78 @@ public:
   void onCommand(HaCommandCallback cb);
 
   /**
+   * @brief Set a handler that gets incoming messages as they arrived, with their topic.
+   *
+   * It's called for commands to entities (before the onCommand() handler, with the payload
+   * as it arrived) and for messages on topics added with subscribe(). It's not called for
+   * the messages the library handles itself: the Home Assistant birth message and
+   * migrateEntityDiscovery().
+   *
+   * Use it when your firmware already has its own MQTT command handling, or for topics
+   * that don't belong to an entity. Like onCommand(), it's called from tick().
+   *
+   * @param cb Message handler
+   */
+  void onMessage(HaMessageCallback cb);
+
+  /**
+   * @brief Subscribe to an extra topic, again after every reconnect.
+   *
+   * The transport passes its messages to the library, so subscribe through here instead of
+   * the MQTT client, and handle them with onMessage(). Wildcards (`+`, `#`) are allowed.
+   * Don't let it overlap the entities' command topics: some brokers then deliver a message
+   * once per matching subscription.
+   *
+   * @param topic Topic or topic filter
+   * @param qos   QoS level (default 0)
+   */
+  void subscribe(const char* topic, uint8_t qos = 0);
+
+  /**
+   * @brief Use another availability topic than `<baseTopicPrefix>/<node_id>/status`.
+   *
+   * It's used for the Last Will, for "online"/"offline" and in the device payload.
+   * Call it before connecting, like setDevice(), so the Last Will uses it.
+   *
+   * @param topic Availability topic, or nullptr for the default
+   */
+  void setAvailabilityTopic(const char* topic);
+
+  /**
+   * @brief Take over the entities this node has on single-component discovery topics.
+   *
+   * Older firmware often publishes one discovery message per entity, on
+   * `<discovery_prefix>/<component>/<node_id>/<object_id>/config`. If those are still
+   * retained on the broker, Home Assistant keeps those entities, and ignores entities in
+   * the device payload that have the same unique_id.
+   *
+   * With this turned on, the library subscribes to
+   * `<discovery_prefix>/+/<node_id>/+/config` and follows Home Assistant's migration steps
+   * for every config it finds there: it publishes `{"migrate_discovery": true}`, then the
+   * device payload, and clears the old topic a few seconds later. Home Assistant keeps the
+   * entities and their settings.
+   *
+   * Only configs whose unique_id matches an entity in the device payload are migrated
+   * (see HaEntityCommon::unique_id), so add the entities before connecting. Others are
+   * left alone and logged as a warning; Home Assistant then shows the old entity next
+   * to the new one, instead of losing it.
+   *
+   * Up to 64 of these retained configs are handled per tick(), apart from the normal
+   * limit of 16 incoming messages.
+   *
+   * After every connect, the device payload waits until those retained messages are in.
+   * To know when, the library also subscribes to `<base>/<node_id>/migration_sync` and
+   * publishes a message there; the broker sends it back after the retained configs.
+   * That usually takes well under a second, with a limit of 10 seconds. Once the old
+   * topics are cleared nothing more happens, so it's fine to leave it on.
+   *
+   * Call it before connecting.
+   *
+   * @param enable Whether to migrate (default true)
+   */
+  void migrateEntityDiscovery(bool enable = true);
+
+  /**
    * @brief Set the origin (`o`) sent in the discovery payload.
    *
    * Home Assistant logs it when entities are discovered, and shows it in the
@@ -546,6 +685,10 @@ public:
    *
    * This happens automatically on every connect, after entity changes and after a
    * Home Assistant birth message. Does nothing while disconnected.
+   *
+   * If the transport doesn't accept the device payload or availability (for example
+   * when the MQTT client is short of memory), tick() tries again after a delay that
+   * grows from PUBLISH_RETRY_MIN_MS to PUBLISH_RETRY_MAX_MS. States are held until then.
    */
   void republishAll();
 
@@ -554,8 +697,9 @@ public:
    *
    * @param retained Retain flag (recommended true)
    * @param qos      QoS level (recommended 1 for availability if supported)
+   * @return true if the publish was accepted by the transport
    */
-  void publishAvailabilityOnline(bool retained = true, uint8_t qos = 1);
+  bool publishAvailabilityOnline(bool retained = true, uint8_t qos = 1);
 
   /**
    * @brief Publish "offline" availability payload to the availability topic (retained by default).
@@ -660,14 +804,18 @@ public:
    * @brief Remove the device and all its entities from Home Assistant.
    *
    * Publishes an empty retained payload to the device discovery topic right away
-   * (if connected), and forgets all entities and states.
+   * (if connected), and forgets all entities and states. If disconnected, or the
+   * transport doesn't accept the publish, tick() publishes it later.
    *
-   * @return true if the publish was accepted by the transport
+   * @return false if setDevice() wasn't called
    */
   bool removeDevice();
 
   /**
-   * @brief Publish an entity state payload using default state topic for object_id.
+   * @brief Publish an entity state payload on the entity's state topic.
+   *
+   * That's the state_topic_override of the entity if it has one, otherwise the
+   * default `<baseTopicPrefix>/<node_id>/<object_id>/state`.
    *
    * The last payload per entity is stored and sent again on connect and after a
    * Home Assistant restart. While disconnected, or while the device payload is waiting
@@ -680,6 +828,21 @@ public:
    * @return true if publish was accepted by transport, false otherwise
    */
   bool publishState(const char* object_id, const char* payload, bool retained = false, uint8_t qos = 0);
+
+  /**
+   * @brief Publish a state payload on any topic, and keep it for re-publishing.
+   *
+   * Like publishState(), but you give the topic. Use it for state topics shared by
+   * several entities (see HaEntityCommon::value_template). The last payload per topic is
+   * sent again on connect and after a Home Assistant restart.
+   *
+   * @param topic    The topic
+   * @param payload  Null-terminated payload string
+   * @param retained Retain flag (usually false for state)
+   * @param qos      QoS level (usually 0 for state)
+   * @return true if publish was accepted by transport (or stored for later), false otherwise
+   */
+  bool publishStateTopic(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
 
   /**
    * @brief Publish a switch state ("ON"/"OFF") using default state topic.
@@ -706,6 +869,9 @@ public:
    *
    * The color_mode is set from what's included: color, then color temperature, then
    * brightness, otherwise onoff.
+   *
+   * For a light with HaLightSchema::Default, each part goes to its own topic instead:
+   * "ON"/"OFF", the brightness, "r,g,b" and the color temperature, the ones the light has.
    */
   bool publishStateLight(const char* object_id, const HaLightState& state, bool retained = false, uint8_t qos = 0);
 
@@ -751,6 +917,21 @@ public:
     return publishState(object_id, payload.c_str(), retained, qos);
   }
 
+  /** @brief Overload of publishStateTopic using std::string. */
+  inline bool publishStateTopic(const std::string& topic, const std::string& payload, bool retained = false, uint8_t qos = 0) {
+    return publishStateTopic(topic.c_str(), payload.c_str(), retained, qos);
+  }
+
+  /** @brief Overload of subscribe using std::string. */
+  inline void subscribe(const std::string& topic, uint8_t qos = 0) {
+    subscribe(topic.c_str(), qos);
+  }
+
+  /** @brief Overload of setAvailabilityTopic using std::string. */
+  inline void setAvailabilityTopic(const std::string& topic) {
+    setAvailabilityTopic(topic.c_str());
+  }
+
   /** @brief Overload of publishStateSwitch using std::string for object_id. */
   inline bool publishStateSwitch(const std::string& object_id, bool on, bool retained = false, uint8_t qos = 0) {
     return publishStateSwitch(object_id.c_str(), on, retained, qos);
@@ -784,6 +965,21 @@ public:
   /** @brief Overload of publishState using Arduino String for payload. */
   inline bool publishState(const char* object_id, const String& payload, bool retained = false, uint8_t qos = 0) {
     return publishState(object_id, payload.c_str(), retained, qos);
+  }
+
+  /** @brief Overload of publishStateTopic using Arduino String. */
+  inline bool publishStateTopic(const String& topic, const String& payload, bool retained = false, uint8_t qos = 0) {
+    return publishStateTopic(topic.c_str(), payload.c_str(), retained, qos);
+  }
+
+  /** @brief Overload of subscribe using Arduino String. */
+  inline void subscribe(const String& topic, uint8_t qos = 0) {
+    subscribe(topic.c_str(), qos);
+  }
+
+  /** @brief Overload of setAvailabilityTopic using Arduino String. */
+  inline void setAvailabilityTopic(const String& topic) {
+    setAvailabilityTopic(topic.c_str());
   }
 
   /** @brief Overload of publishStateSwitch using Arduino String. */
@@ -820,17 +1016,44 @@ private:
   };
 #endif
 
+  /** @brief What a command topic is for; light parts are turned into JSON commands. */
+  enum class CommandKind : uint8_t {
+    Plain,           // passed on as it arrived
+    LightState,      // default schema light: "ON"/"OFF"
+    LightBrightness, // default schema light: a number
+    LightRgb,        // default schema light: "r,g,b"
+    LightColorTemp   // default schema light: kelvin
+  };
+
   /** @brief A component of the device payload. */
   struct Component {
     std::string component;  // platform, e.g. "sensor"
     std::string object_id;  // key in "cmps"
     std::string json;       // serialized component config
+    // Only set when they differ from the defaults, to save RAM.
+    // [0] state topic override; for a default schema light also
+    // [1] brightness, [2] rgb and [3] color temperature state topics ("" if not used).
+    std::vector<std::string> state_topics;
   };
 
   /** @brief A command topic and the object_id it belongs to. */
   struct CommandRoute {
     std::string topic;
     std::string object_id;
+    CommandKind kind;
+  };
+
+  /** @brief An extra subscription made with subscribe(). */
+  struct Subscription {
+    std::string topic;
+    uint8_t qos;
+  };
+
+  /** @brief A single-component discovery topic being migrated. */
+  struct MigrationCleanup {
+    std::string topic;
+    uint32_t at;     // when to retry the migrate message (!sent), or to clear the topic (sent)
+    bool sent;       // the migrate message is out
   };
 
   /** @brief The last state published on a topic, kept for re-publishing. */
@@ -845,6 +1068,7 @@ private:
   struct IncomingMessage {
     std::string topic;
     std::string payload;
+    uint8_t attempts = 0;  // migration configs that couldn't be read for lack of memory
   };
 
   /** @brief Origin information sent as `o`. */
@@ -872,8 +1096,17 @@ private:
   void processIncoming();
   void handleMessage(const IncomingMessage& msg);
 
-  void registerCommandTopic(const std::string& topic, const char* object_id);
-  void setCommandTopics(const char* object_id, const std::vector<std::string>& topics);
+  bool isMigrationTopic(const char* topic) const;
+  bool hasUniqueId(const std::string& uniqueId) const;
+  bool handleMigrationMessage(const IncomingMessage& msg);
+  void processMigrationCleanups(uint32_t now);
+  bool hasUnsentMigrations() const;
+  void schedulePublishRetry(uint32_t now);
+  static std::string lightCommandJson(CommandKind kind, const std::string& payload);
+
+  void registerCommandTopic(const std::string& topic, const char* object_id, CommandKind kind);
+  void setCommandTopics(const char* object_id, const std::vector<std::string>& topics,
+                        const std::vector<CommandKind>& kinds = {});
   std::string commandTopicFor(const char* override_topic, const char* object_id) const;
   bool publishToTopic(const std::string& topic, const char* payload, bool retained, uint8_t qos);
   void unregisterCommandTopics(const char* object_id);
@@ -883,11 +1116,18 @@ private:
   std::string buildDefaultStateTopic(const char* object_id) const;
   std::string buildDefaultCommandTopic(const char* object_id) const;
   std::string buildDefaultAvailabilityTopic() const;
+  std::string availabilityTopic() const;
   std::string buildBirthTopic() const;
+  std::string buildMigrationFilter() const;
+  std::string buildMigrationSyncTopic() const;
+  void startMigrationWait(uint32_t now);
+  std::string entityTopic(const char* override_topic, const char* object_id, const char* suffix) const;
+  const Component* findComponent(const char* object_id) const;
 
-  bool addComponent(const char* component, const char* object_id, std::string json);
+  bool addComponent(const char* component, const char* object_id, std::string json,
+                    std::vector<std::string> state_topics = {});
   std::string buildDevicePayload(bool withRemovalStubs) const;
-  void publishDevicePayload();
+  bool publishDevicePayload();
   bool publishRetained(const std::string& topic, const std::string& payload, uint8_t qos);
   bool canPublishStateNow() const;
 
@@ -901,9 +1141,12 @@ private:
   std::string buildTextConfigJson(const HaTextConfig& cfg) const;
   std::string buildLightConfigJson(const HaLightConfig& cfg) const;
   std::string buildCoverConfigJson(const HaCoverConfig& cfg) const;
-  bool addEntity(const char* component, const HaEntityCommon& common, std::string json);
+  bool addEntity(const char* component, const HaEntityCommon& common, std::string json,
+                 std::vector<std::string> state_topics = {});
 
   void addCommonFields(JsonDocument& doc, const char* component, const HaEntityCommon& common) const;
+  void addValueTemplate(JsonDocument& doc, const HaEntityCommon& common, const char* key = "val_tpl") const;
+  std::vector<std::string> stateTopicsFor(const HaEntityCommon& common) const;
   std::string stateTopicFor(const HaEntityCommon& common) const;
   std::string sanitizeEntityId(const char* entity_id) const;
   static std::string serializeDoc(const JsonDocument& doc);
@@ -925,11 +1168,18 @@ private:
   std::vector<CommandRoute> _commands;
   std::vector<StateEntry> _states;
   HaCommandCallback _onCommand;
+  HaMessageCallback _onMessage;
+  std::vector<Subscription> _subscriptions;
+  std::string _availabilityTopic;  // empty: the default
 
   // Filled from the network task with AsyncMqttClient, emptied in tick()
   QueueMutex _incomingLock;
   std::vector<IncomingMessage> _incoming;
+  size_t _incomingCount = 0;           // other messages in _incoming
+  size_t _incomingMigrationCount = 0;  // migrateEntityDiscovery() messages in _incoming
+  uint32_t _droppedIncoming = 0;
   static constexpr size_t MAX_INCOMING = 16;
+  static constexpr size_t MAX_MIGRATION_INCOMING = 64;
 
   // Set from the network task with AsyncMqttClient, read in tick()
   volatile bool _connectPending = false;
@@ -937,6 +1187,31 @@ private:
   bool _republishPending = false;
   uint32_t _republishAt = 0;
   uint32_t _republishDelayMaxMs = 5000;
+
+  // migrateEntityDiscovery()
+  bool _migrate = false;
+  bool _migrationWait = false;   // holding the device payload for retained single-component configs
+  uint32_t _migrationWaitUntil = 0;
+  bool _migrationSynced = false;   // our sync message came back, so the retained configs are in
+  uint32_t _migrationSyncToken = 0;
+  std::vector<MigrationCleanup> _migrationCleanups;
+  std::vector<IncomingMessage> _deferredMigrations;  // tried again in the next tick()
+  static constexpr uint32_t MIGRATION_WAIT_MS = 2000;           // if the sync message wasn't sent
+  static constexpr uint32_t MIGRATION_SYNC_TIMEOUT_MS = 10000;  // if it doesn't come back
+  static constexpr uint32_t MIGRATION_CLEANUP_DELAY_MS = 5000;
+  static constexpr uint32_t MIGRATION_RETRY_MS = 1000;   // a migrate or clear publish failed
+  static constexpr uint8_t MIGRATION_PARSE_ATTEMPTS = 20;  // reading an old config, one per tick()
+
+  // A device payload, removal stub or availability publish failed
+  bool _publishRetry = false;
+  uint32_t _publishRetryAt = 0;
+  uint32_t _publishRetryDelayMs = 0;
+
+public:
+  /** @brief First retry delay after the transport didn't accept the device payload. */
+  static constexpr uint32_t PUBLISH_RETRY_MIN_MS = 1000;
+  /** @brief The retry delay doubles up to this. */
+  static constexpr uint32_t PUBLISH_RETRY_MAX_MS = 30000;
 };
 
 /** @} */

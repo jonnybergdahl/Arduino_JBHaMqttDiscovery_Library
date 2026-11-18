@@ -14,6 +14,11 @@
 //   pause                      stop/start sensor updates (uptime expires after 30 s)
 //   restart                    ESP.restart()
 //
+// 1.1.0 features: migrateEntityDiscovery(), setAvailabilityTopic() (devices/<node>/availability),
+// two sensors on one JSON topic (value_template), a custom unique_id, state_topic_override
+// through publishState(), a default schema light, and onMessage() + subscribe():
+// a message on devices/<node>/raw/echo is published back on devices/<node>/raw_echo.
+//
 // Builds for the TinyS3 (ESP32-S3) and the Wemos D1 mini (ESP8266).
 
 #include <Arduino.h>
@@ -62,6 +67,13 @@ static const int BOOT_BUTTON_PIN = 0;
 
 std::string nodeId;
 std::string altAvailTopic;
+std::string availTopic;
+std::string infoTopic;
+std::string customTopic;
+std::string legacyUniqueId;
+std::string rawFilter;
+std::string rawEchoIn;
+std::string rawEchoOut;
 bool relayOn = false;
 bool lastButton = false;
 unsigned long pings = 0;
@@ -99,6 +111,7 @@ void publishLight() {
   st.b = ledB;
 #endif
   ha.publishStateLight("led", st);
+  ha.publishStateLight("led_default", st);
 }
 
 void publishCover() {
@@ -127,7 +140,7 @@ void onCommand(const char* objectId, const char* payload) {
     ha.publishStateNumber("interval", reportIntervalMs / 1000.0, 0);
   } else if (strcmp(objectId, "mode") == 0 || strcmp(objectId, "message") == 0) {
     ha.publishState(objectId, payload);
-  } else if (strcmp(objectId, "led") == 0) {
+  } else if (strcmp(objectId, "led") == 0 || strcmp(objectId, "led_default") == 0) {
     HaLightCommand cmd;
     if (HaDiscovery::parseLightCommand(payload, cmd)) {
       if (cmd.has_state) ledOn = cmd.on;
@@ -262,6 +275,50 @@ void addEntities() {
     .has_position = true
   };
   ha.publishCoverDiscovery(blind);
+
+  // 1.1.0: two sensors reading one JSON state topic
+  HaSensorConfig infoIp{
+    .common = { .object_id = "info_ip", .name = "IP address", .icon = "mdi:ip-network",
+                .state_topic_override = infoTopic.c_str(),
+                .entity_category = HaEntityCategory::Diagnostic,
+                .value_template = "{{ value_json.ip }}" },
+  };
+  ha.publishSensorDiscovery(infoIp);
+
+  HaSensorConfig infoChannel{
+    .common = { .object_id = "info_channel", .name = "Wi-Fi channel", .icon = "mdi:wifi",
+                .state_topic_override = infoTopic.c_str(),
+                .entity_category = HaEntityCategory::Diagnostic,
+                .value_template = "{{ value_json.channel }}" },
+  };
+  ha.publishSensorDiscovery(infoChannel);
+
+  // 1.1.0: keeps a unique_id that isn't <node_id>_<object_id>
+  HaSensorConfig legacy{
+    .common = { .object_id = "legacy_counter", .name = "Legacy counter", .icon = "mdi:counter",
+                .unique_id = legacyUniqueId.c_str() },
+    .state_class = "total_increasing"
+  };
+  ha.publishSensorDiscovery(legacy);
+
+  // 1.1.0: publishState() goes to the override topic
+  HaSensorConfig custom{
+    .common = { .object_id = "custom_topic", .name = "Override topic", .icon = "mdi:arrow-decision",
+                .state_topic_override = customTopic.c_str() },
+  };
+  ha.publishSensorDiscovery(custom);
+
+  // 1.1.0: default schema light on the same LED
+  HaLightConfig ledDefault{
+    .common = { .object_id = "led_default", .name = "LED (default schema)" },
+#ifdef ESP8266
+    .color_mode = HaLightColorMode::Brightness,
+#else
+    .color_mode = HaLightColorMode::Rgb,
+#endif
+    .schema = HaLightSchema::Default
+  };
+  ha.publishLightDiscovery(ledDefault);
 }
 
 void publishSettings() {
@@ -284,6 +341,12 @@ void publishSensors() {
   ha.publishState("chip_temp", t);
 #endif
   ha.publishState("alt_avail", "42");
+
+  char info[64];
+  snprintf(info, sizeof(info), "{\"ip\":\"%s\",\"channel\":%d}", WiFi.localIP().toString().c_str(), (int)WiFi.channel());
+  ha.publishStateTopic(infoTopic.c_str(), info);
+  ha.publishState("legacy_counter", std::to_string(millis() / 10000));
+  ha.publishState("custom_topic", std::to_string(millis() / 1000));
 }
 
 void publishAlt(const char* payload) {
@@ -410,8 +473,20 @@ void setup() {
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
 #endif
   logger.info("Connecting to Wi-Fi %s", WIFI_SSID);
+  unsigned long attemptAt = millis();
   while (WiFi.status() != WL_CONNECTED) {
     delay(250);
+    // A failed attempt (e.g. AUTH_EXPIRE on the TinyS3) isn't retried by itself
+    if (millis() - attemptAt > 15000) {
+      logger.warning("No Wi-Fi after 15 s, trying again");
+      WiFi.disconnect();
+      delay(100);
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+#ifdef WIFI_LOW_TX_POWER
+      WiFi.setTxPower(WIFI_POWER_8_5dBm);
+#endif
+      attemptAt = millis();
+    }
   }
   logger.info("Wi-Fi connected, IP %s", WiFi.localIP().toString().c_str());
 
@@ -420,6 +495,13 @@ void setup() {
   mac.toLowerCase();
   nodeId = std::string("jbhatest_") + mac.c_str();
   altAvailTopic = "devices/" + nodeId + "/alt_status";
+  availTopic = "devices/" + nodeId + "/availability";
+  infoTopic = "devices/" + nodeId + "/info";
+  customTopic = "devices/" + nodeId + "/custom/state";
+  legacyUniqueId = nodeId + "_old_counter";
+  rawFilter = "devices/" + nodeId + "/raw/#";
+  rawEchoIn = "devices/" + nodeId + "/raw/echo";
+  rawEchoOut = "devices/" + nodeId + "/raw_echo";
   std::string visitUrl = std::string("http://") + WiFi.localIP().toString().c_str() + "/";
 
   ha.setDevice({
@@ -432,6 +514,17 @@ void setup() {
     .configuration_url = visitUrl.c_str()
   });
   ha.onCommand(onCommand);
+
+  // 1.1.0
+  ha.setAvailabilityTopic(availTopic.c_str());
+  ha.migrateEntityDiscovery();
+  ha.onMessage([](const char* topic, const char* payload) {
+    logger.info("Message on %s: %s", topic, payload);
+    if (rawEchoIn == topic) {
+      ha.publishStateTopic(rawEchoOut.c_str(), payload);
+    }
+  });
+  ha.subscribe(rawFilter.c_str());
 
   transport.setServer(MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS);
   transport.connect(nodeId.c_str());

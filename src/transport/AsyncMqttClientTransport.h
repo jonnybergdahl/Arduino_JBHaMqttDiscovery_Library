@@ -1,5 +1,6 @@
 #pragma once
 #include "MqttTransport.h"
+#include "MessageAssembler.h"
 #include <AsyncMqttClient.h>
 
 /**
@@ -25,8 +26,8 @@
  * instead of copying them. This transport keeps its own copies, so callers
  * don't need to keep those strings alive.
  *
- * Incoming messages split over several TCP packets are ignored. Discovery
- * command payloads are short, so this doesn't happen in practice.
+ * AsyncMqttClient hands over longer incoming messages in parts. The transport puts
+ * them together up to setMaxMessageSize() bytes (4096 by default) and drops larger ones.
  *
  * After the first connect(), tick() reconnects when the connection drops (see
  * setAutoReconnect()). Turn this off if your firmware already reconnects with its
@@ -224,16 +225,39 @@ public:
 
     client.onMessage([this](char* topic, char* payload, AsyncMqttClientMessageProperties /*properties*/,
                             size_t len, size_t index, size_t total) {
-      if (index != 0 || len != total) {
-        if (log) log->warning("Async message on %s split into parts (%u of %u bytes), ignored",
-                              topic, (unsigned)len, (unsigned)total);
+      const uint8_t* data = reinterpret_cast<const uint8_t*>(payload);
+      if (index == 0 && len == total) {
+        deliver(topic, data, len);
         return;
       }
-      if (log) log->debug("Async message topic=%s len=%u", topic, (unsigned)len);
-      if (msgCb) {
-        msgCb(msgCtx, topic, reinterpret_cast<const uint8_t*>(payload), len);
+      switch (assembler.add(topic, data, len, index, total)) {
+        case MessageAssembler::Result::Complete:
+          deliver(assembler.topic().c_str(), reinterpret_cast<const uint8_t*>(assembler.payload().data()),
+                  assembler.payload().size());
+          assembler.release();
+          break;
+        case MessageAssembler::Result::TooLarge:
+          if (log) log->warning("Async message on %s is %u bytes, more than %u, ignored",
+                                topic, (unsigned)total, (unsigned)assembler.maxSize());
+          break;
+        case MessageAssembler::Result::Broken:
+          if (log) log->warning("Async message on %s arrived out of order, ignored", topic);
+          break;
+        default:
+          break;
       }
     });
+  }
+
+  /**
+   * @brief Set the largest incoming message that is put together from parts.
+   *
+   * AsyncMqttClient hands over longer messages in parts; larger ones are dropped.
+   *
+   * @param maxSize Size in bytes (default 4096)
+   */
+  void setMaxMessageSize(size_t maxSize) {
+    assembler.setMaxSize(maxSize);
   }
 
   /**
@@ -272,6 +296,13 @@ public:
   }
 
 private:
+  void deliver(const char* topic, const uint8_t* payload, size_t len) {
+    if (log) log->debug("Async message topic=%s len=%u", topic, (unsigned)len);
+    if (msgCb) {
+      msgCb(msgCtx, topic, payload, len);
+    }
+  }
+
   void startAttempt() {
     if (log) log->info("Async connecting");
     attemptStartedAt = millis();
@@ -298,6 +329,7 @@ private:
   /** @brief Pointer to user context for callback. */
   void* ctx = nullptr;
   MessageCallback msgCb = nullptr;
+  MessageAssembler assembler;
   void* msgCtx = nullptr;
 };
 /** @} */

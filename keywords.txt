@@ -22,9 +22,17 @@ PubSubClientTransport	KEYWORD1
 AsyncMqttClientTransport	KEYWORD1
 EspMqttClientTransport	KEYWORD1
 HaCommandCallback	KEYWORD1
+HaMessageCallback	KEYWORD1
+HaLightSchema	KEYWORD1
+MessageAssembler	KEYWORD1
 
 setDevice	KEYWORD2
 onCommand	KEYWORD2
+onMessage	KEYWORD2
+setAvailabilityTopic	KEYWORD2
+migrateEntityDiscovery	KEYWORD2
+publishStateTopic	KEYWORD2
+setMaxMessageSize	KEYWORD2
 setOrigin	KEYWORD2
 republishAll	KEYWORD2
 setRepublishDelay	KEYWORD2

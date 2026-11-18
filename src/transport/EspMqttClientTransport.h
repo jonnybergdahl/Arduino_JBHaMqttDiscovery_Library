@@ -1,5 +1,6 @@
 #pragma once
 #include "MqttTransport.h"
+#include "MessageAssembler.h"
 #include <Arduino.h>
 
 /**
@@ -37,6 +38,13 @@
  *
  * The transport takes over the client's onConnect, onDisconnect and onMessage callbacks
  * (espMqttClient keeps only one of each by default).
+ *
+ * espMqttClient refuses to publish while the largest free block of heap is below
+ * EMC_MIN_FREE_MEMORY (16 KB by default). On ESP8266 that's often all the time, so
+ * build with a lower value, e.g. `-D EMC_MIN_FREE_MEMORY=4096`.
+ *
+ * espMqttClient hands over longer incoming messages in parts. The transport puts
+ * them together up to setMaxMessageSize() bytes (4096 by default) and drops larger ones.
  *
  * After the first connect(), tick() reconnects when the connection drops (see
  * setAutoReconnect()).
@@ -135,8 +143,14 @@ public:
     static const uint8_t empty = 0;
     uint16_t pid = client.publish(topic, qos, retained, payload ? payload : &empty, payload ? len : 0);
     if (pid == 0) {
+#if defined(ESP8266) && defined(EMC_MIN_FREE_MEMORY)
+      // espMqttClient refuses packets while the largest free block is below EMC_MIN_FREE_MEMORY
+      if (log) log->error("espMqtt publish FAILED topic=%s len=%u (largest free block %u, EMC_MIN_FREE_MEMORY %u)",
+                          topic, (unsigned)len, (unsigned)ESP.getMaxFreeBlockSize(), (unsigned)EMC_MIN_FREE_MEMORY);
+#else
       // Also happens when free memory is below EMC_MIN_FREE_MEMORY
       if (log) log->error("espMqtt publish FAILED topic=%s len=%u", topic, (unsigned)len);
+#endif
       return false;
     }
     if (log) log->debug("espMqtt publish OK topic=%s len=%u pid=%u", topic, (unsigned)len, (unsigned)pid);
@@ -163,22 +177,49 @@ public:
   /**
    * @inheritdoc
    *
-   * Messages split into several parts are ignored. Discovery command payloads are short.
+   * Messages handed over in parts are put together first (see setMaxMessageSize()).
    */
   void setOnMessage(MessageCallback cb_, void* ctx_) override {
     msgCb = cb_;
     msgCtx = ctx_;
     client.onMessage([this](const espMqttClientTypes::MessageProperties& /*properties*/, const char* topic,
                             const uint8_t* payload, size_t len, size_t index, size_t total) {
-      if (index != 0 || len != total) {
-        if (log) log->warning("espMqtt message on %s split into parts (%u of %u bytes), ignored",
-                              topic, (unsigned)len, (unsigned)total);
+      if (index == 0 && len == total) {
+        if (msgCb) {
+          msgCb(msgCtx, topic, payload, len);
+        }
         return;
       }
-      if (msgCb) {
-        msgCb(msgCtx, topic, payload, len);
+      switch (assembler.add(topic, payload, len, index, total)) {
+        case MessageAssembler::Result::Complete:
+          if (msgCb) {
+            msgCb(msgCtx, assembler.topic().c_str(),
+                  reinterpret_cast<const uint8_t*>(assembler.payload().data()), assembler.payload().size());
+          }
+          assembler.release();
+          break;
+        case MessageAssembler::Result::TooLarge:
+          if (log) log->warning("espMqtt message on %s is %u bytes, more than %u, ignored",
+                                topic, (unsigned)total, (unsigned)assembler.maxSize());
+          break;
+        case MessageAssembler::Result::Broken:
+          if (log) log->warning("espMqtt message on %s arrived out of order, ignored", topic);
+          break;
+        default:
+          break;
       }
     });
+  }
+
+  /**
+   * @brief Set the largest incoming message that is put together from parts.
+   *
+   * espMqttClient hands over longer messages in parts; larger ones are dropped.
+   *
+   * @param maxSize Size in bytes (default 4096)
+   */
+  void setMaxMessageSize(size_t maxSize) {
+    assembler.setMaxSize(maxSize);
   }
 
   /**
@@ -305,5 +346,6 @@ private:
   void* ctx = nullptr;
   MessageCallback msgCb = nullptr;
   void* msgCtx = nullptr;
+  MessageAssembler assembler;
 };
 /** @} */

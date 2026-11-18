@@ -8,6 +8,8 @@
 // espMqttClient (https://github.com/bertmelis/espMqttClient) is a maintained successor
 // of AsyncMqttClient. espMqttClient uses the normal WiFiClient; use espMqttClientAsync
 // from <espMqttClientAsync.h> for the AsyncTCP-based version.
+// On ESP8266, build with -D EMC_MIN_FREE_MEMORY=4096: espMqttClient won't publish
+// until 16 KB of heap is free in one block, which an ESP8266 seldom has.
 #include <espMqttClient.h>
 #include <HaDiscovery.h>
 #include <transport/EspMqttClientTransport.h>

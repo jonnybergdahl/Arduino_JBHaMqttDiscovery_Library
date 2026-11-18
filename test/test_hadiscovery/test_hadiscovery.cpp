@@ -2,8 +2,11 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <chrono>
+#include <thread>
 #include "HaDiscovery.h"
 #include "transport/MqttTransport.h"
+#include "transport/MessageAssembler.h"
 #include <ArduinoJson.h>
 
 static const char* kDeviceTopic = "homeassistant/device/test_node/config";
@@ -63,7 +66,20 @@ public:
 
     bool connected() const override { return isConnected; }
 
+    // Refuse publishes, like a client short of memory or with a full outbox
+    bool rejectAll = false;
+    std::vector<std::string> rejectTopics;
+    int rejected = 0;
+
     bool publish(const char* topic, const uint8_t* payload, size_t len, bool retained, uint8_t qos) override {
+        bool reject = rejectAll;
+        for (const std::string& t : rejectTopics) {
+            reject = reject || t == topic;
+        }
+        if (reject) {
+            rejected++;
+            return false;
+        }
         Message msg;
         msg.topic = topic;
         if (payload && len > 0) {
@@ -92,6 +108,9 @@ public:
         willTopic.clear();
         willPayload.clear();
         isConnected = true;
+        rejectAll = false;
+        rejectTopics.clear();
+        rejected = 0;
     }
 
     // Messages published to a topic, in order
@@ -1145,6 +1164,730 @@ void test_reconnect_backoff_wraps(void) {
     TEST_ASSERT_TRUE(b.due(0xFFFFFF00u + 1000u));
 }
 
+
+// ---------------------------------------------------------------------------
+// 1.1.0: value templates, unique_id, state topics, default schema lights,
+// raw messages, availability topic, migration
+// ---------------------------------------------------------------------------
+
+static std::vector<std::pair<std::string, std::string>> rawMessages;
+
+static void recordMessage(const char* topic, const char* payload) {
+    rawMessages.push_back({topic, payload});
+}
+
+static void sleepMs(int ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+static const char* kSyncTopic = "devices/test_node/migration_sync";
+
+// The broker sends our migration sync message back, after the retained configs
+static void deliverMigrationSync() {
+    std::vector<MockTransport::Message> sync = transport.on(kSyncTopic);
+    TEST_ASSERT_FALSE(sync.empty());
+    transport.deliver(kSyncTopic, sync.back().payload.c_str());
+}
+
+void test_value_template_and_unique_id(void) {
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    ip.common.state_topic_override = "wopr/test_node/diagnostic/state";
+    ip.common.value_template = "{{ value_json.ipAddress }}";
+    ip.common.unique_id = "old_unique_ip";
+    discovery->publishSensorDiscovery(ip);
+
+    HaButtonConfig restart;
+    restart.common.object_id = "restart";
+    restart.common.value_template = "{{ value }}";  // no state, left out
+    discovery->publishButtonDiscovery(restart);
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.ipAddress }}", doc["cmps"]["ip"]["val_tpl"]);
+    TEST_ASSERT_EQUAL_STRING("old_unique_ip", doc["cmps"]["ip"]["uniq_id"]);
+    TEST_ASSERT_EQUAL_STRING("wopr/test_node/diagnostic/state", doc["cmps"]["ip"]["stat_t"]);
+    TEST_ASSERT_FALSE(doc["cmps"]["restart"]["val_tpl"].is<const char*>());
+    TEST_ASSERT_EQUAL_STRING("test_node_restart", doc["cmps"]["restart"]["uniq_id"]);
+}
+
+void test_publish_state_uses_state_topic_override(void) {
+    HaSwitchConfig sw;
+    sw.common.object_id = "relay";
+    sw.common.state_topic_override = "custom/relay/state";
+    discovery->publishSwitchDiscovery(sw);
+    discovery->tick();
+    transport.messages.clear();
+
+    discovery->publishStateSwitch("relay", true);
+    TEST_ASSERT_EQUAL(1, transport.on("custom/relay/state").size());
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/relay/state").size());
+
+    // Not an entity: the default topic
+    discovery->publishState("other", "x");
+    TEST_ASSERT_EQUAL(1, transport.on("devices/test_node/other/state").size());
+}
+
+void test_publish_state_topic_is_republished(void) {
+    addSensor("ip");
+    discovery->tick();
+    transport.messages.clear();
+
+    TEST_ASSERT_TRUE(discovery->publishStateTopic("wopr/test_node/diagnostic/state", "{\"ip\":\"1\"}"));
+    TEST_ASSERT_TRUE(discovery->publishStateTopic("wopr/test_node/diagnostic/state", "{\"ip\":\"2\"}"));
+    TEST_ASSERT_EQUAL(2, transport.on("wopr/test_node/diagnostic/state").size());
+
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+    std::vector<MockTransport::Message> msgs = transport.on("wopr/test_node/diagnostic/state");
+    TEST_ASSERT_EQUAL(1, msgs.size());
+    TEST_ASSERT_EQUAL_STRING("{\"ip\":\"2\"}", msgs[0].payload.c_str());
+    TEST_ASSERT_TRUE(transport.indexOf(kDeviceTopic) < transport.indexOf("wopr/test_node/diagnostic/state"));
+    TEST_ASSERT_FALSE(discovery->publishStateTopic(nullptr, "x"));
+}
+
+void test_default_schema_light_config(void) {
+    HaLightConfig rgb;
+    rgb.common.object_id = "defcon";
+    rgb.schema = HaLightSchema::Default;
+    rgb.color_mode = HaLightColorMode::Rgb;
+    rgb.brightness_scale = 100;
+    rgb.common.state_topic_override = "wopr/test_node/defcon/state";
+    rgb.command_topic_override = "wopr/test_node/defcon/state/set";
+    rgb.rgb_state_topic_override = "wopr/test_node/defcon/color";
+    rgb.rgb_command_topic_override = "wopr/test_node/defcon/color/set";
+    rgb.common.value_template = "{{ value }}";
+    discovery->publishLightDiscovery(rgb);
+
+    HaLightConfig ct;
+    ct.common.object_id = "ct";
+    ct.schema = HaLightSchema::Default;
+    ct.color_mode = HaLightColorMode::ColorTemp;
+    discovery->publishLightDiscovery(ct);
+
+    HaLightConfig onoff;
+    onoff.common.object_id = "onoff";
+    onoff.schema = HaLightSchema::Default;
+    onoff.color_mode = HaLightColorMode::OnOff;
+    discovery->publishLightDiscovery(onoff);
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject d = doc["cmps"]["defcon"];
+    TEST_ASSERT_FALSE(d["schema"].is<const char*>());
+    TEST_ASSERT_FALSE(d["supported_color_modes"].is<JsonArray>());
+    TEST_ASSERT_EQUAL_STRING("wopr/test_node/defcon/state", d["stat_t"]);
+    TEST_ASSERT_EQUAL_STRING("wopr/test_node/defcon/state/set", d["cmd_t"]);
+    TEST_ASSERT_EQUAL_STRING("{{ value }}", d["stat_val_tpl"]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/defcon/brightness", d["brightness_state_topic"]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/defcon/brightness/set", d["brightness_command_topic"]);
+    TEST_ASSERT_EQUAL_STRING("wopr/test_node/defcon/color", d["rgb_state_topic"]);
+    TEST_ASSERT_EQUAL_STRING("wopr/test_node/defcon/color/set", d["rgb_command_topic"]);
+    TEST_ASSERT_EQUAL(100, d["brightness_scale"].as<int>());
+
+    JsonObject c = doc["cmps"]["ct"];
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/ct/color_temp/set", c["color_temp_command_topic"]);
+    TEST_ASSERT_TRUE(c["color_temp_kelvin"].as<bool>());
+    TEST_ASSERT_FALSE(c["rgb_command_topic"].is<const char*>());
+
+    JsonObject o = doc["cmps"]["onoff"];
+    TEST_ASSERT_FALSE(o["brightness_command_topic"].is<const char*>());
+
+    // Subscribed to every command topic
+    transport.subscriptions.clear();
+    transport.fireConnect();
+    discovery->tick();
+    auto subscribed = [](const char* t) {
+        for (const std::string& s : transport.subscriptions) {
+            if (s == t) return true;
+        }
+        return false;
+    };
+    TEST_ASSERT_TRUE(subscribed("wopr/test_node/defcon/state/set"));
+    TEST_ASSERT_TRUE(subscribed("devices/test_node/defcon/brightness/set"));
+    TEST_ASSERT_TRUE(subscribed("wopr/test_node/defcon/color/set"));
+    TEST_ASSERT_TRUE(subscribed("devices/test_node/ct/color_temp/set"));
+}
+
+void test_default_schema_light_commands_become_json(void) {
+    HaLightConfig rgb;
+    rgb.common.object_id = "lamp";
+    rgb.schema = HaLightSchema::Default;
+    rgb.color_mode = HaLightColorMode::Rgb;
+    discovery->publishLightDiscovery(rgb);
+    discovery->onCommand(recordCommand);
+    discovery->tick();
+
+    transport.deliver("devices/test_node/lamp/set", "ON");
+    transport.deliver("devices/test_node/lamp/brightness/set", "128");
+    transport.deliver("devices/test_node/lamp/rgb/set", "255,300,-1");
+    transport.deliver("devices/test_node/lamp/rgb/set", "garbage");
+    discovery->tick();
+
+    TEST_ASSERT_EQUAL(3, commands.size());
+    HaLightCommand cmd;
+    TEST_ASSERT_TRUE(HaDiscovery::parseLightCommand(commands[0].second.c_str(), cmd));
+    TEST_ASSERT_TRUE(cmd.has_state);
+    TEST_ASSERT_TRUE(cmd.on);
+    TEST_ASSERT_TRUE(HaDiscovery::parseLightCommand(commands[1].second.c_str(), cmd));
+    TEST_ASSERT_TRUE(cmd.has_brightness);
+    TEST_ASSERT_EQUAL(128, cmd.brightness);
+    TEST_ASSERT_TRUE(HaDiscovery::parseLightCommand(commands[2].second.c_str(), cmd));
+    TEST_ASSERT_TRUE(cmd.has_color);
+    TEST_ASSERT_EQUAL(255, cmd.r);
+    TEST_ASSERT_EQUAL(255, cmd.g);
+    TEST_ASSERT_EQUAL(0, cmd.b);
+    TEST_ASSERT_EQUAL_STRING("lamp", commands[2].first.c_str());
+}
+
+void test_default_schema_light_state(void) {
+    HaLightConfig rgb;
+    rgb.common.object_id = "lamp";
+    rgb.schema = HaLightSchema::Default;
+    rgb.color_mode = HaLightColorMode::Rgb;
+    discovery->publishLightDiscovery(rgb);
+    discovery->tick();
+    transport.messages.clear();
+
+    HaLightState st;
+    st.on = true;
+    st.brightness = 40;
+    st.r = 1; st.g = 2; st.b = 3;
+    st.color_temp_kelvin = 3000;  // the light has no color temperature
+    TEST_ASSERT_TRUE(discovery->publishStateLight("lamp", st));
+    TEST_ASSERT_EQUAL_STRING("ON", transport.on("devices/test_node/lamp/state")[0].payload.c_str());
+    TEST_ASSERT_EQUAL_STRING("40", transport.on("devices/test_node/lamp/brightness")[0].payload.c_str());
+    TEST_ASSERT_EQUAL_STRING("1,2,3", transport.on("devices/test_node/lamp/rgb")[0].payload.c_str());
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/lamp/color_temp").size());
+    TEST_ASSERT_EQUAL(3, transport.messages.size());
+
+    // Removing it drops its stored states
+    discovery->removeEntity("light", "lamp");
+    discovery->tick();
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/lamp/rgb").size());
+}
+
+void test_on_message_and_subscribe(void) {
+    HaSwitchConfig sw;
+    sw.common.object_id = "relay";
+    discovery->publishSwitchDiscovery(sw);
+    discovery->subscribe("devices/test_node/extra/#", 1);
+    discovery->onMessage(recordMessage);
+    discovery->onCommand(recordCommand);
+    rawMessages.clear();
+
+    transport.subscriptions.clear();
+    transport.fireConnect();
+    discovery->tick();
+    bool found = false;
+    for (const std::string& t : transport.subscriptions) {
+        found = found || t == "devices/test_node/extra/#";
+    }
+    TEST_ASSERT_TRUE(found);
+
+    // Added while connected: subscribed right away
+    transport.subscriptions.clear();
+    discovery->subscribe("other/topic");
+    TEST_ASSERT_EQUAL(1, transport.subscriptions.size());
+
+    transport.deliver("devices/test_node/relay/set", "ON");
+    transport.deliver("devices/test_node/extra/thing", "hello");
+    transport.deliver("homeassistant/status", "online");
+    discovery->tick();
+
+    TEST_ASSERT_EQUAL(2, rawMessages.size());
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/relay/set", rawMessages[0].first.c_str());
+    TEST_ASSERT_EQUAL_STRING("ON", rawMessages[0].second.c_str());
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/extra/thing", rawMessages[1].first.c_str());
+    TEST_ASSERT_EQUAL(1, commands.size());  // onCommand still gets entity commands
+}
+
+void test_set_availability_topic(void) {
+    discovery->setAvailabilityTopic("wopr/test_node/availability");
+    TEST_ASSERT_EQUAL_STRING("wopr/test_node/availability", transport.willTopic.c_str());
+    TEST_ASSERT_EQUAL_STRING("offline", transport.willPayload.c_str());
+
+    addSensor();
+    discovery->tick();
+    JsonDocument doc = lastDevicePayload();
+    TEST_ASSERT_EQUAL_STRING("wopr/test_node/availability", doc["avty_t"]);
+    TEST_ASSERT_EQUAL(1, transport.on("wopr/test_node/availability").size());
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/status").size());
+
+    // Back to the default
+    discovery->setAvailabilityTopic(nullptr);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/status", transport.willTopic.c_str());
+}
+
+void test_migrate_entity_discovery(void) {
+    const char* oldTopic = "homeassistant/sensor/test_node/diagnostic_ip/config";
+    discovery->migrateEntityDiscovery();
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    ip.common.unique_id = "test_node_diagnostic_ip";
+    discovery->publishSensorDiscovery(ip);
+    discovery->publishState("ip", "1.2.3.4");
+
+    transport.messages.clear();
+    transport.subscriptions.clear();
+    transport.fireConnect();
+    discovery->tick();
+    bool found = false;
+    for (const std::string& t : transport.subscriptions) {
+        found = found || t == "homeassistant/+/test_node/+/config";
+    }
+    TEST_ASSERT_TRUE(found);
+    // Waits for retained single-component configs first
+    TEST_ASSERT_EQUAL(0, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/ip/state").size());
+
+    // The broker sends the retained old config (and other topics that aren't ours)
+    transport.deliver(oldTopic, "{\"name\":\"IP\",\"uniq_id\":\"test_node_diagnostic_ip\"}");
+    transport.deliver("homeassistant/sensor/other_node/x/config", "{\"name\":\"X\"}");
+    transport.deliver("homeassistant/sensor/test_node/cleared/config", "");
+    discovery->tick();
+    std::vector<MockTransport::Message> old = transport.on(oldTopic);
+    TEST_ASSERT_EQUAL(1, old.size());
+    TEST_ASSERT_TRUE(old[0].retained);
+    TEST_ASSERT_EQUAL(0, old[0].qos);  // QoS 0, so AsyncMqttClient doesn't wait for a PUBACK per message
+    JsonDocument m;
+    deserializeJson(m, old[0].payload);
+    TEST_ASSERT_TRUE(m["migrate_discovery"].as<bool>());
+    TEST_ASSERT_EQUAL(0, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_EQUAL(0, transport.on("homeassistant/sensor/test_node/cleared/config").size());
+
+    // Our own migrate message comes back; nothing new is published for it
+    transport.deliver(oldTopic, old[0].payload.c_str());
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(oldTopic).size());
+
+    // Once the sync message is back: device payload, then the states
+    deliverMigrationSync();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_TRUE(transport.indexOf(oldTopic) < transport.indexOf(kDeviceTopic));
+    TEST_ASSERT_TRUE(transport.indexOf(kDeviceTopic) < transport.indexOf("devices/test_node/ip/state"));
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic)[0].qos);  // the device payload stays at QoS 1
+    TEST_ASSERT_EQUAL_STRING("test_node_diagnostic_ip", lastDevicePayload()["cmps"]["ip"]["uniq_id"]);
+    TEST_ASSERT_EQUAL(1, transport.on(oldTopic).size());  // not cleared yet
+
+    // 5 s after the migrate message the old topic is cleared
+    sleepMs(5100);
+    discovery->tick();
+    old = transport.on(oldTopic);
+    TEST_ASSERT_EQUAL(2, old.size());
+    TEST_ASSERT_TRUE(old[1].payload.empty());
+    TEST_ASSERT_TRUE(old[1].retained);
+    TEST_ASSERT_EQUAL(0, old[1].qos);
+
+    // Without migration, messages on those topics are just passed on
+    discovery->migrateEntityDiscovery(false);
+    discovery->onMessage(recordMessage);
+    rawMessages.clear();
+    transport.deliver(oldTopic, "{\"name\":\"IP\"}");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, rawMessages.size());
+    TEST_ASSERT_EQUAL(2, transport.on(oldTopic).size());
+}
+
+void test_no_migration_wait_by_default(void) {
+    addSensor();
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+}
+
+void test_migration_burst_is_not_dropped(void) {
+    discovery->migrateEntityDiscovery();
+    const int n = 20;  // more than the normal queue limit of 16
+    for (int i = 0; i < n; i++) {
+        std::string id = "s" + std::to_string(i);
+        std::string uid = "old_" + id;
+        HaSensorConfig cfg;
+        cfg.common.object_id = id.c_str();
+        cfg.common.unique_id = uid.c_str();
+        discovery->publishSensorDiscovery(cfg);
+    }
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+
+    for (int i = 0; i < n; i++) {
+        std::string topic = "homeassistant/sensor/test_node/old" + std::to_string(i) + "/config";
+        std::string payload = "{\"uniq_id\":\"old_s" + std::to_string(i) + "\"}";
+        transport.deliver(topic.c_str(), payload.c_str());
+    }
+    discovery->tick();
+    for (int i = 0; i < n; i++) {
+        std::string topic = "homeassistant/sensor/test_node/old" + std::to_string(i) + "/config";
+        TEST_ASSERT_EQUAL_MESSAGE(1, transport.on(topic).size(), topic.c_str());
+    }
+}
+
+void test_migration_skips_unknown_unique_id(void) {
+    const char* oldTopic = "homeassistant/sensor/test_node/gone/config";
+    discovery->migrateEntityDiscovery();
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    ip.common.unique_id = "test_node_diagnostic_ip";
+    discovery->publishSensorDiscovery(ip);
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+
+    // unique_id mismatch, and no unique_id at all: both left alone
+    transport.deliver(oldTopic, "{\"name\":\"Gone\",\"uniq_id\":\"test_node_something_else\"}");
+    transport.deliver("homeassistant/sensor/test_node/noid/config", "{\"name\":\"No id\"}");
+    // Full key name is accepted too
+    transport.deliver("homeassistant/sensor/test_node/full/config", "{\"unique_id\":\"test_node_diagnostic_ip\"}");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on(oldTopic).size());
+    TEST_ASSERT_EQUAL(0, transport.on("homeassistant/sensor/test_node/noid/config").size());
+    TEST_ASSERT_EQUAL(1, transport.on("homeassistant/sensor/test_node/full/config").size());
+
+    // And they're never cleared
+    deliverMigrationSync();
+    discovery->tick();
+    sleepMs(5100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on(oldTopic).size());
+    TEST_ASSERT_EQUAL(2, transport.on("homeassistant/sensor/test_node/full/config").size());
+}
+
+void test_migration_waits_for_sync(void) {
+    discovery->migrateEntityDiscovery();
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    discovery->publishSensorDiscovery(ip);
+    transport.messages.clear();
+    transport.subscriptions.clear();
+    transport.fireConnect();
+    discovery->tick();
+
+    // Subscribed to the old topics before publishing the sync message (not retained)
+    size_t filterAt = transport.subscriptions.size(), syncAt = transport.subscriptions.size();
+    for (size_t i = 0; i < transport.subscriptions.size(); i++) {
+        if (transport.subscriptions[i] == "homeassistant/+/test_node/+/config") filterAt = i;
+        if (transport.subscriptions[i] == kSyncTopic) syncAt = i;
+    }
+    TEST_ASSERT_TRUE(filterAt < syncAt && syncAt < transport.subscriptions.size());
+    std::vector<MockTransport::Message> sync = transport.on(kSyncTopic);
+    TEST_ASSERT_EQUAL(1, sync.size());
+    TEST_ASSERT_FALSE(sync[0].retained);
+
+    // A slow broker: still waiting after 2 s
+    sleepMs(2100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on(kDeviceTopic).size());
+
+    // A sync message from an earlier connection doesn't count, and isn't passed on
+    discovery->onMessage(recordMessage);
+    rawMessages.clear();
+    transport.deliver(kSyncTopic, "stale");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_EQUAL(0, rawMessages.size());
+
+    // The old config, then our sync message: migrated first, then the device payload
+    const char* oldTopic = "homeassistant/sensor/test_node/ip/config";
+    transport.deliver(oldTopic, "{\"uniq_id\":\"test_node_ip\"}");
+    deliverMigrationSync();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_TRUE(transport.indexOf(oldTopic) < transport.indexOf(kDeviceTopic));
+    TEST_ASSERT_EQUAL(0, rawMessages.size());
+
+    // Every connect sends a new one
+    transport.fireConnect();
+    discovery->tick();
+    sync = transport.on(kSyncTopic);
+    TEST_ASSERT_EQUAL(2, sync.size());
+    TEST_ASSERT_TRUE(sync[0].payload != sync[1].payload);
+}
+
+void test_migration_reads_only_what_it_needs(void) {
+    discovery->migrateEntityDiscovery();
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    discovery->publishSensorDiscovery(ip);
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+
+    // A full old config with a device block: the unique_id is still found
+    const char* full = "homeassistant/sensor/test_node/ip/config";
+    transport.deliver(full, "{\"name\":\"IP\",\"stat_t\":\"x/ip\",\"dev\":{\"ids\":[\"test_node\"],\"name\":\"Old\",\"mf\":\"Me\"},"
+                            "\"uniq_id\":\"test_node_ip\",\"avty\":[{\"t\":\"x/status\"}]}");
+    // Not JSON: left alone
+    const char* broken = "homeassistant/sensor/test_node/broken/config";
+    transport.deliver(broken, "{\"uniq_id\":\"test_node_ip\"");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(full).size());
+    TEST_ASSERT_EQUAL(0, transport.on(broken).size());
+
+    deliverMigrationSync();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+}
+
+void test_migration_wait_without_sync(void) {
+    discovery->migrateEntityDiscovery();
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    discovery->publishSensorDiscovery(ip);
+
+    // The sync message can't be sent: a short fixed wait instead
+    transport.messages.clear();
+    transport.rejectTopics = {kSyncTopic};
+    transport.fireConnect();
+    discovery->tick();
+    sleepMs(2100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+
+    // It was sent but never comes back: published after 10 s anyway
+    transport.rejectTopics.clear();
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+    sleepMs(2100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on(kDeviceTopic).size());
+    sleepMs(8000);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+}
+
+// ---------------------------------------------------------------------------
+// Publishes the transport doesn't accept
+// ---------------------------------------------------------------------------
+
+void test_device_payload_retried_after_failed_publish(void) {
+    addSensor();
+    discovery->publishState("temp", "21");
+    transport.messages.clear();
+    transport.rejectAll = true;
+    transport.fireConnect();
+    discovery->tick();
+    TEST_ASSERT_TRUE(transport.rejected > 0);
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+
+    // Not before the retry delay, and states are held meanwhile
+    transport.rejectAll = false;
+    discovery->tick();
+    discovery->publishState("temp", "22");
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+
+    sleepMs(1100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_EQUAL(1, transport.on("devices/test_node/status").size());
+    std::vector<MockTransport::Message> st = transport.on("devices/test_node/temp/state");
+    TEST_ASSERT_EQUAL(1, st.size());
+    TEST_ASSERT_EQUAL_STRING("22", st[0].payload.c_str());
+    TEST_ASSERT_TRUE(transport.indexOf(kDeviceTopic) < transport.indexOf("devices/test_node/temp/state"));
+
+    // Done: nothing more
+    sleepMs(1100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+}
+
+void test_failed_availability_is_retried(void) {
+    addSensor();
+    discovery->tick();
+    transport.messages.clear();
+    transport.rejectTopics = {"devices/test_node/status"};
+    discovery->republishAll();
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/status").size());
+    transport.rejectTopics.clear();
+    sleepMs(1100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on("devices/test_node/status").size());
+}
+
+void test_publish_retry_backs_off(void) {
+    addSensor();
+    transport.rejectAll = true;
+    transport.fireConnect();
+    discovery->tick();                 // attempt 1, next in 1 s
+    int attempts = transport.rejected;
+    TEST_ASSERT_TRUE(attempts > 0);
+    sleepMs(1100);
+    discovery->tick();                 // attempt 2, next in 2 s
+    TEST_ASSERT_TRUE(transport.rejected > attempts);
+    attempts = transport.rejected;
+    sleepMs(1100);
+    discovery->tick();                 // too early
+    TEST_ASSERT_EQUAL(attempts, transport.rejected);
+    sleepMs(1000);
+    discovery->tick();                 // attempt 3
+    TEST_ASSERT_TRUE(transport.rejected > attempts);
+
+    // A new connection tries right away
+    transport.rejectAll = false;
+    transport.fireConnect();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+}
+
+void test_removal_stub_kept_after_failed_publish(void) {
+    addSensor("temp");
+    addSensor("humidity");
+    discovery->tick();
+    discovery->removeEntity("sensor", "humidity");
+    transport.messages.clear();
+    transport.rejectAll = true;
+    discovery->tick();
+    transport.rejectAll = false;
+    sleepMs(1100);
+    discovery->tick();
+    std::vector<MockTransport::Message> dev = transport.on(kDeviceTopic);
+    TEST_ASSERT_EQUAL(2, dev.size());
+    JsonDocument stub;
+    deserializeJson(stub, dev[0].payload);
+    TEST_ASSERT_EQUAL_STRING("sensor", stub["cmps"]["humidity"]["p"]);
+    TEST_ASSERT_FALSE(lastDevicePayload()["cmps"]["humidity"].is<JsonObject>());
+}
+
+void test_remove_device_retried_after_failed_publish(void) {
+    addSensor();
+    discovery->tick();
+    transport.messages.clear();
+    transport.rejectAll = true;
+    TEST_ASSERT_TRUE(discovery->removeDevice());
+    TEST_ASSERT_EQUAL(0, transport.on(kDeviceTopic).size());
+    transport.rejectAll = false;
+    sleepMs(1100);
+    discovery->tick();
+    std::vector<MockTransport::Message> dev = transport.on(kDeviceTopic);
+    TEST_ASSERT_EQUAL(1, dev.size());
+    TEST_ASSERT_TRUE(dev[0].payload.empty());
+}
+
+void test_failed_migrate_message_holds_device_payload(void) {
+    const char* oldTopic = "homeassistant/sensor/test_node/ip/config";
+    discovery->migrateEntityDiscovery();
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    discovery->publishSensorDiscovery(ip);
+    transport.messages.clear();
+    transport.fireConnect();
+    discovery->tick();
+
+    transport.rejectTopics = {oldTopic};
+    transport.deliver(oldTopic, "{\"name\":\"IP\",\"uniq_id\":\"test_node_ip\"}");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.rejected);
+
+    // The wait is over, but the migrate message isn't out: no device payload yet
+    deliverMigrationSync();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on(oldTopic).size());
+    TEST_ASSERT_EQUAL(0, transport.on(kDeviceTopic).size());
+
+    // The retry gets through, then the device payload follows
+    transport.rejectTopics.clear();
+    sleepMs(1100);
+    discovery->tick();
+    std::vector<MockTransport::Message> old = transport.on(oldTopic);
+    TEST_ASSERT_EQUAL(1, old.size());
+    TEST_ASSERT_EQUAL_STRING("{\"migrate_discovery\":true}", old[0].payload.c_str());
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_TRUE(transport.indexOf(oldTopic) < transport.indexOf(kDeviceTopic));
+
+    // Our migrate message coming back doesn't start a second migration
+    transport.deliver(oldTopic, old[0].payload.c_str());
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(oldTopic).size());
+
+    sleepMs(5100);
+    discovery->tick();
+    old = transport.on(oldTopic);
+    TEST_ASSERT_EQUAL(2, old.size());
+    TEST_ASSERT_TRUE(old[1].payload.empty());
+}
+
+void test_failed_migration_clear_is_retried(void) {
+    const char* oldTopic = "homeassistant/sensor/test_node/ip/config";
+    discovery->migrateEntityDiscovery();
+    HaSensorConfig ip;
+    ip.common.object_id = "ip";
+    discovery->publishSensorDiscovery(ip);
+    transport.fireConnect();
+    discovery->tick();
+    transport.deliver(oldTopic, "{\"uniq_id\":\"test_node_ip\"}");
+    discovery->tick();
+    deliverMigrationSync();
+    discovery->tick();
+    transport.messages.clear();
+
+    transport.rejectTopics = {oldTopic};
+    sleepMs(5100);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.rejected);
+    transport.rejectTopics.clear();
+    sleepMs(1100);
+    discovery->tick();
+    std::vector<MockTransport::Message> old = transport.on(oldTopic);
+    TEST_ASSERT_EQUAL(1, old.size());
+    TEST_ASSERT_TRUE(old[0].payload.empty());
+}
+
+// ---------------------------------------------------------------------------
+// MessageAssembler (messages handed over in parts)
+// ---------------------------------------------------------------------------
+
+static const uint8_t* bytes(const char* s) { return reinterpret_cast<const uint8_t*>(s); }
+
+void test_assembler_puts_parts_together(void) {
+    MessageAssembler a;
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("t/1", bytes("hello "), 6, 0, 11));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Complete == a.add("t/1", bytes("world"), 5, 6, 11));
+    TEST_ASSERT_EQUAL_STRING("t/1", a.topic().c_str());
+    TEST_ASSERT_EQUAL_STRING("hello world", a.payload().c_str());
+    a.release();
+    TEST_ASSERT_EQUAL(0, a.payload().size());
+
+    // The next message starts over
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("t/2", bytes("ab"), 2, 0, 3));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Complete == a.add("t/2", bytes("c"), 1, 2, 3));
+    TEST_ASSERT_EQUAL_STRING("abc", a.payload().c_str());
+}
+
+void test_assembler_drops_too_large(void) {
+    MessageAssembler a(8);
+    TEST_ASSERT_TRUE(MessageAssembler::Result::TooLarge == a.add("t", bytes("12345"), 5, 0, 10));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Ignored == a.add("t", bytes("67890"), 5, 5, 10));
+    // A fitting message afterwards works
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("t", bytes("1234"), 4, 0, 8));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Complete == a.add("t", bytes("5678"), 4, 4, 8));
+}
+
+void test_assembler_drops_broken_message(void) {
+    MessageAssembler a;
+    // A part is missing
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("t", bytes("aa"), 2, 0, 6));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Broken == a.add("t", bytes("cc"), 2, 4, 6));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Ignored == a.add("t", bytes("cc"), 2, 4, 6));
+    // Another topic in between
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("t", bytes("aa"), 2, 0, 4));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Broken == a.add("u", bytes("bb"), 2, 2, 4));
+    // A first part without the rest, then a new message
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("t", bytes("aa"), 2, 0, 4));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("v", bytes("xy"), 2, 0, 3));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Complete == a.add("v", bytes("z"), 1, 2, 3));
+    TEST_ASSERT_EQUAL_STRING("xyz", a.payload().c_str());
+    // Longer than announced
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Pending == a.add("t", bytes("aa"), 2, 0, 3));
+    TEST_ASSERT_TRUE(MessageAssembler::Result::Broken == a.add("t", bytes("bb"), 2, 2, 3));
+}
+
 static void runAll() {
     RUN_TEST(test_sensor_component);
     RUN_TEST(test_switch_component);
@@ -1198,6 +1941,31 @@ static void runAll() {
     RUN_TEST(test_reconnect_backoff);
     RUN_TEST(test_reconnect_backoff_wraps);
     RUN_TEST(test_reconnect_now_sets_request_once);
+    RUN_TEST(test_value_template_and_unique_id);
+    RUN_TEST(test_publish_state_uses_state_topic_override);
+    RUN_TEST(test_publish_state_topic_is_republished);
+    RUN_TEST(test_default_schema_light_config);
+    RUN_TEST(test_default_schema_light_commands_become_json);
+    RUN_TEST(test_default_schema_light_state);
+    RUN_TEST(test_on_message_and_subscribe);
+    RUN_TEST(test_set_availability_topic);
+    RUN_TEST(test_migrate_entity_discovery);
+    RUN_TEST(test_no_migration_wait_by_default);
+    RUN_TEST(test_migration_burst_is_not_dropped);
+    RUN_TEST(test_migration_skips_unknown_unique_id);
+    RUN_TEST(test_device_payload_retried_after_failed_publish);
+    RUN_TEST(test_failed_availability_is_retried);
+    RUN_TEST(test_publish_retry_backs_off);
+    RUN_TEST(test_removal_stub_kept_after_failed_publish);
+    RUN_TEST(test_remove_device_retried_after_failed_publish);
+    RUN_TEST(test_failed_migrate_message_holds_device_payload);
+    RUN_TEST(test_failed_migration_clear_is_retried);
+    RUN_TEST(test_migration_waits_for_sync);
+    RUN_TEST(test_migration_reads_only_what_it_needs);
+    RUN_TEST(test_migration_wait_without_sync);
+    RUN_TEST(test_assembler_puts_parts_together);
+    RUN_TEST(test_assembler_drops_too_large);
+    RUN_TEST(test_assembler_drops_broken_message);
 }
 
 // Support for native environment where setup/loop might not be enough for unity runner
