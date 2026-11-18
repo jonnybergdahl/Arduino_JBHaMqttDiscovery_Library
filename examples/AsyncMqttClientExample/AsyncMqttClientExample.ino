@@ -8,7 +8,11 @@
 #include <AsyncMqttClient.h>
 #include <HaDiscovery.h>
 #include <transport/AsyncMqttClientTransport.h>
+#ifndef NO_JB_LOGGER
 #include <jblogger.h>
+#else
+#include <JBLoggerDummy.h>
+#endif
 
 const char* ssid = "your-ssid";
 const char* password = "your-password";
@@ -19,20 +23,20 @@ const char* mqtt_pass = "your-mqtt-password";
 AsyncMqttClient mqtt;
 AsyncMqttClientTransport transport(mqtt);
 HaDiscovery ha(transport);
-JBLogger log("Main");
+JBLogger logger("Main");
 
 void setup() {
   Serial.begin(115200);
-  log.setLogLevel(LOG_LEVEL_DEBUG);
+  logger.setLogLevel(LOG_LEVEL_DEBUG);
   ha.setLogLevel(LOG_LEVEL_DEBUG);
 
-  log.info("Connecting to WiFi...");
+  logger.info("Connecting to WiFi...");
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }
-  log.info("WiFi connected");
+  logger.info("WiFi connected");
 
   String mac = WiFi.macAddress();
   mac.replace(":", "");

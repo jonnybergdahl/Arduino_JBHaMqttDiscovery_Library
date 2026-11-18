@@ -204,6 +204,41 @@ void test_press_button(void) {
     TEST_ASSERT_EQUAL_STRING("CUSTOM", transport.messages[0].payload.c_str());
 }
 
+void test_device_strings_are_copied(void) {
+    char nodeId[16] = "temp_node";
+    char mac[16] = "temp_mac";
+    HaDeviceInfo dev;
+    dev.node_id = nodeId;
+    dev.identifiers = mac;
+    discovery->setDevice(dev);
+
+    // Overwrite the caller's buffers, like a local String going out of scope
+    strcpy(nodeId, "XXXXXXXXX");
+    strcpy(mac, "XXXXXXXX");
+
+    discovery->publishState("temp", "1");
+    TEST_ASSERT_EQUAL_STRING("devices/temp_node/temp/state", transport.messages[0].topic.c_str());
+
+    transport.clear();
+    HaSensorConfig cfg;
+    cfg.common.object_id = "temp";
+    discovery->publishSensorDiscovery(cfg);
+    JsonDocument doc;
+    deserializeJson(doc, transport.messages[0].payload);
+    TEST_ASSERT_EQUAL_STRING("temp_node_temp", doc["uniq_id"]);
+    TEST_ASSERT_EQUAL_STRING("temp_mac", doc["dev"]["ids"][0]);
+    TEST_ASSERT_TRUE(doc["dev"]["name"].isNull());
+}
+
+void test_no_device_publishes_nothing(void) {
+    HaDiscovery fresh(transport);
+    fresh.setLogLevel(LOG_LEVEL_NONE);
+    fresh.publishAvailabilityOnline();
+    fresh.publishAvailabilityOffline();
+    TEST_ASSERT_FALSE(fresh.publishState("temp", "1"));
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+}
+
 // Support for native environment where setup/loop might not be enough for unity runner
 #if defined(ARDUINO)
 void setup() {
@@ -218,6 +253,8 @@ void setup() {
     RUN_TEST(test_remove_entity);
     RUN_TEST(test_availability);
     RUN_TEST(test_press_button);
+    RUN_TEST(test_device_strings_are_copied);
+    RUN_TEST(test_no_device_publishes_nothing);
     UNITY_END();
 }
 
@@ -234,6 +271,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_remove_entity);
     RUN_TEST(test_availability);
     RUN_TEST(test_press_button);
+    RUN_TEST(test_device_strings_are_copied);
+    RUN_TEST(test_no_device_publishes_nothing);
     return UNITY_END();
 }
 #endif

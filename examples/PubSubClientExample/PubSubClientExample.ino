@@ -8,7 +8,11 @@
 #include <PubSubClient.h>
 #include <HaDiscovery.h>
 #include <transport/PubSubClientTransport.h>
+#ifndef NO_JB_LOGGER
 #include <jblogger.h>
+#else
+#include <JBLoggerDummy.h>
+#endif
 
 const char* ssid = "your-ssid";
 const char* password = "your-password";
@@ -20,25 +24,26 @@ WiFiClient wifi;
 PubSubClient mqtt(wifi);
 PubSubClientTransport transport(mqtt);
 HaDiscovery ha(transport, "homeassistant", "devices");
-JBLogger log("Main");
+JBLogger logger("Main", LogLevel::LOG_LEVEL_DEBUG);
 
 void setup() {
   Serial.begin(115200);
-  log.setLogLevel(LOG_LEVEL_DEBUG);
+  while (!Serial) {}  // Wait for Serial to be ready
   ha.setLogLevel(LOG_LEVEL_DEBUG);
 
-  log.info("Connecting to WiFi...");
+  logger.info("Connecting to WiFi...");
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
   }
-  log.info("WiFi connected");
+  logger.info("WiFi connected");
 
   String mac = WiFi.macAddress();
   mac.replace(":", "");
   String nodeId = "esp32_" + mac;
 
+  // HaDiscovery copies these strings, so local Strings are fine here
   ha.setDevice({
     .node_id = nodeId.c_str(),
     .name = "Office Node",
@@ -47,6 +52,7 @@ void setup() {
     .sw_version = "1.0.0",
     .identifiers = mac.c_str()
   });
+  logger.info("node_id: %s", nodeId.c_str());
 
   transport.setServer(mqtt_server, 1883, mqtt_user, mqtt_pass);
   mqtt.connect(nodeId.c_str(), mqtt_user, mqtt_pass);

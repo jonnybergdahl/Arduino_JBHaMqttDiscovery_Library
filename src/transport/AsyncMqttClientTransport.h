@@ -77,7 +77,7 @@ public:
                bool retained,
                uint8_t qos) override {
     if (!isConnected) {
-      if (log) log->warn("Async publish skipped (disconnected) topic=%s", topic);
+      if (log) log->warning("Async publish skipped (disconnected) topic=%s", topic);
       return false;
     }
 

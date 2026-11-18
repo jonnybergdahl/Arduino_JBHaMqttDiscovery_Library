@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
+#include <ArduinoJson.h>
 #include "transport/MqttTransport.h"
 
 /**
@@ -193,7 +194,9 @@ public:
    *
    * This must be called before publishing discovery configs if you want correct device registry behavior.
    *
-   * @param dev Device info struct (pointers must remain valid)
+   * The strings are copied, so the pointers in @p dev only need to be valid during this call.
+   *
+   * @param dev Device info struct
    */
   void setDevice(const HaDeviceInfo& dev);
 
@@ -370,13 +373,25 @@ private:
   bool buildBinarySensorConfigJson(char* out, size_t outLen, const HaBinarySensorConfig& cfg) const;
   bool buildButtonConfigJson(char* out, size_t outLen, const HaButtonConfig& cfg) const;
 
+  void addDeviceObject(JsonDocument& doc) const;
+  bool hasDevice() const { return !_device.node_id.empty(); }
+
+  /** @brief Owned copies of the HaDeviceInfo strings (empty means not set). */
+  struct DeviceData {
+    std::string node_id;
+    std::string name;
+    std::string manufacturer;
+    std::string model;
+    std::string sw_version;
+    std::string identifiers;
+  };
 
 private:
   MqttTransport& _transport;
   std::string _discoveryPrefix;
   std::string _baseTopicPrefix;
-  JBLogger* _log;
-  HaDeviceInfo _device{};
+  JBLogger _log;
+  DeviceData _device;
 
   static constexpr size_t JSON_BUF = 768;
 };

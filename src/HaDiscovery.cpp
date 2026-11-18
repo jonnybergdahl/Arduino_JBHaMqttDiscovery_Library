@@ -3,8 +3,8 @@
 #include <string.h>
 #include <ArduinoJson.h>
 
-#if __has_include(<jblogger.h>)
-#include <jblogger.h>
+// The logger header itself is included through transport/MqttTransport.h
+#ifndef NO_JB_LOGGER
 #define HAS_LOG
 #endif
 
@@ -21,17 +21,23 @@ HaDiscovery::HaDiscovery(MqttTransport& transport,
   : _transport(transport),
     _discoveryPrefix(discovery_prefix ? discovery_prefix : "homeassistant"),
     _baseTopicPrefix(base_topic_prefix ? base_topic_prefix : "devices"),
-    _log(new JBLogger("HaDiscovery", log_level)) {
-  _transport.setLogger(_log);
+    _log("HaDiscovery", log_level) {
+  _transport.setLogger(&_log);
   _transport.setOnConnect(&HaDiscovery::onTransportConnectThunk, this);
 }
 
 void HaDiscovery::setLogLevel(LogLevel level) {
-  _log->setLogLevel(level);
+  _log.setLogLevel(level);
 }
 
 void HaDiscovery::setDevice(const HaDeviceInfo& dev) {
-  _device = dev;
+  auto copy = [](const char* v) { return v ? std::string(v) : std::string(); };
+  _device.node_id = copy(dev.node_id);
+  _device.name = copy(dev.name);
+  _device.manufacturer = copy(dev.manufacturer);
+  _device.model = copy(dev.model);
+  _device.sw_version = copy(dev.sw_version);
+  _device.identifiers = copy(dev.identifiers);
 }
 
 void HaDiscovery::tick() {
@@ -44,7 +50,7 @@ void HaDiscovery::onTransportConnectThunk(void* ctx) {
 
 void HaDiscovery::onTransportConnect() {
 #ifdef HAS_LOG
-  _log->info("MQTT Transport connected");
+  _log.info("MQTT Transport connected");
 #endif
   // Default behavior: publish availability online on connect.
   // Optional enhancement: re-publish all registered discovery configs.
@@ -52,20 +58,29 @@ void HaDiscovery::onTransportConnect() {
 }
 
 void HaDiscovery::publishAvailabilityOnline(bool retained, uint8_t qos) {
+  if (!hasDevice()) {
+#ifdef HAS_LOG
+    _log.warning("Skipping availability online, setDevice() has not been called");
+#endif
+    return;
+  }
   std::string topic = buildDefaultAvailabilityTopic();
   _transport.publish(topic.c_str(), reinterpret_cast<const uint8_t*>(kAvailOnline), strlen(kAvailOnline), retained, qos);
 }
 
 void HaDiscovery::publishAvailabilityOffline(bool retained, uint8_t qos) {
+  if (!hasDevice()) {
+    return;
+  }
   std::string topic = buildDefaultAvailabilityTopic();
 #ifdef HAS_LOG
-  _log->info("Publishing availability offline to %s", topic.c_str());
+  _log.info("Publishing availability offline to %s", topic.c_str());
 #endif
   _transport.publish(topic.c_str(), reinterpret_cast<const uint8_t*>(kAvailOffline), strlen(kAvailOffline), retained, qos);
 }
 
 bool HaDiscovery::publishSensorDiscovery(const HaSensorConfig& cfg, bool retained, uint8_t qos) {
-  if (!_device.node_id || !cfg.common.object_id) {
+  if (!hasDevice() || !cfg.common.object_id) {
     return false;
   }
 
@@ -80,7 +95,7 @@ bool HaDiscovery::publishSensorDiscovery(const HaSensorConfig& cfg, bool retaine
 }
 
 bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retained, uint8_t qos) {
-  if (!_device.node_id || !cfg.common.object_id) {
+  if (!hasDevice() || !cfg.common.object_id) {
     return false;
   }
 
@@ -95,7 +110,7 @@ bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retaine
 }
 
 bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained, uint8_t qos) {
-  if (!_device.node_id || !cfg.common.object_id) {
+  if (!hasDevice() || !cfg.common.object_id) {
     return false;
   }
 
@@ -110,7 +125,7 @@ bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, 
 }
 
 bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retained, uint8_t qos) {
-  if (!_device.node_id || !cfg.common.object_id) {
+  if (!hasDevice() || !cfg.common.object_id) {
     return false;
   }
 
@@ -125,7 +140,7 @@ bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retaine
 }
 
 bool HaDiscovery::removeEntity(const char* component, const char* object_id, uint8_t qos) {
-  if (!_device.node_id || !component || !object_id) {
+  if (!hasDevice() || !component || !object_id) {
     return false;
   }
 
@@ -136,14 +151,14 @@ bool HaDiscovery::removeEntity(const char* component, const char* object_id, uin
 }
 
 bool HaDiscovery::publishState(const char* object_id, const char* payload, bool retained, uint8_t qos) {
-  if (!_device.node_id || !object_id || !payload) {
+  if (!hasDevice() || !object_id || !payload) {
     return false;
   }
 
   std::string topic = buildDefaultStateTopic(object_id);
 
 #ifdef HAS_LOG
-  _log->debug("Publishing state to %s: %s", topic.c_str(), payload);
+  _log.debug("Publishing state to %s: %s", topic.c_str(), payload);
 #endif
   bool ok = _transport.publish(topic.c_str(),
                       reinterpret_cast<const uint8_t*>(payload),
@@ -152,7 +167,7 @@ bool HaDiscovery::publishState(const char* object_id, const char* payload, bool 
                       qos);
 #ifdef HAS_LOG
   if (!ok) {
-    _log->error("Failed to publish state to %s", topic.c_str());
+    _log.error("Failed to publish state to %s", topic.c_str());
   }
 #endif
   return ok;
@@ -182,9 +197,27 @@ std::string HaDiscovery::buildDefaultAvailabilityTopic() const {
   return _baseTopicPrefix + "/" + _device.node_id + "/status";
 }
 
+void HaDiscovery::addDeviceObject(JsonDocument& doc) const {
+  JsonObject dev = doc["dev"].to<JsonObject>();
+  JsonArray ids = dev["ids"].to<JsonArray>();
+  ids.add(_device.identifiers.empty() ? _device.node_id : _device.identifiers);
+  if (!_device.name.empty()) {
+    dev["name"] = _device.name;
+  }
+  if (!_device.manufacturer.empty()) {
+    dev["mf"] = _device.manufacturer;
+  }
+  if (!_device.model.empty()) {
+    dev["mdl"] = _device.model;
+  }
+  if (!_device.sw_version.empty()) {
+    dev["sw"] = _device.sw_version;
+  }
+}
+
 bool HaDiscovery::publishConfigJson(const char* topic, const char* json, bool retained, uint8_t qos) {
 #ifdef HAS_LOG
-  _log->debug("Publishing discovery config to %s", topic);
+  _log.debug("Publishing discovery config to %s", topic);
 #endif
   bool ok = _transport.publish(topic,
                       reinterpret_cast<const uint8_t*>(json),
@@ -193,7 +226,7 @@ bool HaDiscovery::publishConfigJson(const char* topic, const char* json, bool re
                       qos);
 #ifdef HAS_LOG
   if (!ok) {
-    _log->error("Failed to publish discovery config to %s", topic);
+    _log.error("Failed to publish discovery config to %s", topic);
   }
 #endif
   return ok;
@@ -215,7 +248,7 @@ bool HaDiscovery::buildSensorConfigJson(char* out, size_t outLen, const HaSensor
 
   JsonDocument doc;
   doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = std::string(_device.node_id) + "_" + cfg.common.object_id;
+  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
   doc["uniq_id"] = uniq;
 
   doc["stat_t"] = stateTopic;
@@ -236,22 +269,7 @@ bool HaDiscovery::buildSensorConfigJson(char* out, size_t outLen, const HaSensor
     doc["stat_cla"] = cfg.state_class;
   }
 
-  // Device object
-  JsonObject dev = doc["dev"].to<JsonObject>();
-  JsonArray ids = dev["ids"].to<JsonArray>();
-  ids.add(_device.identifiers ? _device.identifiers : _device.node_id);
-  if (_device.name) {
-    dev["name"] = _device.name;
-  }
-  if (_device.manufacturer) {
-    dev["mf"] = _device.manufacturer;
-  }
-  if (_device.model) {
-    dev["mdl"] = _device.model;
-  }
-  if (_device.sw_version) {
-    dev["sw"] = _device.sw_version;
-  }
+  addDeviceObject(doc);
 
   size_t n = serializeJson(doc, out, outLen);
   if (n == 0 || n >= outLen) {
@@ -283,7 +301,7 @@ bool HaDiscovery::buildSwitchConfigJson(char* out, size_t outLen, const HaSwitch
 
   JsonDocument doc;
   doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = std::string(_device.node_id) + "_" + cfg.common.object_id;
+  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
   doc["uniq_id"] = uniq;
   doc["stat_t"] = stateTopic;
   doc["cmd_t"] = cmdTopic;
@@ -296,21 +314,7 @@ bool HaDiscovery::buildSwitchConfigJson(char* out, size_t outLen, const HaSwitch
     doc["icon"] = cfg.common.icon;
   }
 
-  JsonObject dev = doc["dev"].to<JsonObject>();
-  JsonArray ids = dev["ids"].to<JsonArray>();
-  ids.add(_device.identifiers ? _device.identifiers : _device.node_id);
-  if (_device.name) {
-    dev["name"] = _device.name;
-  }
-  if (_device.manufacturer) {
-    dev["mf"] = _device.manufacturer;
-  }
-  if (_device.model) {
-    dev["mdl"] = _device.model;
-  }
-  if (_device.sw_version) {
-    dev["sw"] = _device.sw_version;
-  }
+  addDeviceObject(doc);
 
   size_t n = serializeJson(doc, out, outLen);
   if (n == 0 || n >= outLen) {
@@ -338,7 +342,7 @@ bool HaDiscovery::buildButtonConfigJson(char* out, size_t outLen, const HaButton
 
   JsonDocument doc;
   doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = std::string(_device.node_id) + "_" + cfg.common.object_id;
+  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
   doc["uniq_id"] = uniq;
   doc["cmd_t"] = cmdTopic;
   doc["pl_prs"] = pPress;
@@ -349,21 +353,7 @@ bool HaDiscovery::buildButtonConfigJson(char* out, size_t outLen, const HaButton
     doc["icon"] = cfg.common.icon;
   }
 
-  JsonObject dev = doc["dev"].to<JsonObject>();
-  JsonArray ids = dev["ids"].to<JsonArray>();
-  ids.add(_device.identifiers ? _device.identifiers : _device.node_id);
-  if (_device.name) {
-    dev["name"] = _device.name;
-  }
-  if (_device.manufacturer) {
-    dev["mf"] = _device.manufacturer;
-  }
-  if (_device.model) {
-    dev["mdl"] = _device.model;
-  }
-  if (_device.sw_version) {
-    dev["sw"] = _device.sw_version;
-  }
+  addDeviceObject(doc);
 
   size_t n = serializeJson(doc, out, outLen);
   if (n == 0 || n >= outLen) {
@@ -391,7 +381,7 @@ bool HaDiscovery::buildBinarySensorConfigJson(char* out, size_t outLen, const Ha
 
   JsonDocument doc;
   doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = std::string(_device.node_id) + "_" + cfg.common.object_id;
+  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
   doc["uniq_id"] = uniq;
   doc["stat_t"] = stateTopic;
   doc["avty_t"] = availTopic;
@@ -406,21 +396,7 @@ bool HaDiscovery::buildBinarySensorConfigJson(char* out, size_t outLen, const Ha
     doc["dev_cla"] = cfg.device_class;
   }
 
-  JsonObject dev = doc["dev"].to<JsonObject>();
-  JsonArray ids = dev["ids"].to<JsonArray>();
-  ids.add(_device.identifiers ? _device.identifiers : _device.node_id);
-  if (_device.name) {
-    dev["name"] = _device.name;
-  }
-  if (_device.manufacturer) {
-    dev["mf"] = _device.manufacturer;
-  }
-  if (_device.model) {
-    dev["mdl"] = _device.model;
-  }
-  if (_device.sw_version) {
-    dev["sw"] = _device.sw_version;
-  }
+  addDeviceObject(doc);
 
   size_t n = serializeJson(doc, out, outLen);
   if (n == 0 || n >= outLen) {
@@ -430,7 +406,7 @@ bool HaDiscovery::buildBinarySensorConfigJson(char* out, size_t outLen, const Ha
 }
 
 bool HaDiscovery::pressButton(const char* object_id, const char* payload, bool retained, uint8_t qos) {
-  if (!_device.node_id || !object_id) {
+  if (!hasDevice() || !object_id) {
     return false;
   }
 
