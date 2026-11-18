@@ -43,7 +43,7 @@ void watchWiFi() {
 #endif
 }
 
-// Called when Home Assistant sends a command
+// Called from ha.tick() when Home Assistant sends a command
 void onCommand(const char* objectId, const char* payload) {
   logger.info("Command for %s: %s", objectId, payload);
   if (strcmp(objectId, "relay1") == 0) {
@@ -55,6 +55,17 @@ void onCommand(const char* objectId, const char* payload) {
 
 void setup() {
   Serial.begin(115200);
+  // Give a connected computer up to 2 s to open the port, but don't wait for one:
+  // the board normally runs from a power supply with nothing on the USB port.
+  unsigned long serialStart = millis();
+  while (!Serial && millis() - serialStart < 2000) {
+    delay(10);
+  }
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  // ESP32 native USB (USB-Serial/JTAG): drop log output when no computer reads it,
+  // instead of blocking loop()
+  Serial.setTxTimeoutMs(0);
+#endif
   logger.setLogLevel(LOG_LEVEL_DEBUG);
   ha.setLogLevel(LOG_LEVEL_DEBUG);
 
@@ -69,13 +80,17 @@ void setup() {
 
   String mac = WiFi.macAddress();
   mac.replace(":", "");
-  String nodeId = "esp32_" + mac;
+  String nodeId = "node_" + mac;  // letters, digits, '_' and '-' only
 
   ha.setDevice({
     .node_id = nodeId.c_str(),
     .name = "Kitchen Node",
     .manufacturer = "YourBrand",
+#ifdef ARDUINO_ARCH_ESP8266
+    .model = "ESP8266",
+#else
     .model = "ESP32",
+#endif
     .sw_version = "1.0.0",
     .identifiers = mac.c_str()
   });
@@ -83,7 +98,7 @@ void setup() {
   transport.setServer(mqtt_host, 1883, mqtt_user, mqtt_pass);
   ha.onCommand(onCommand);
   // Connect through the transport so the Last Will and credentials are used
-  transport.connect(nodeId.c_str());
+  transport.connect(nodeId);
 
   HaSensorConfig temp{
     .common = { .object_id="temperature", .name="Temperature" },

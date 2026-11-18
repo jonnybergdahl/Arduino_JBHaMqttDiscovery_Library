@@ -7,6 +7,9 @@
 #endif
 #include <string>
 #include <vector>
+#ifdef ARDUINO
+#include <Arduino.h>  // String
+#endif
 #include <ArduinoJson.h>
 #include "transport/MqttTransport.h"
 
@@ -752,6 +755,58 @@ public:
   inline bool publishStateSwitch(const std::string& object_id, bool on, bool retained = false, uint8_t qos = 0) {
     return publishStateSwitch(object_id.c_str(), on, retained, qos);
   }
+
+#ifdef ARDUINO
+  // Convenience overloads for Arduino String parameters
+
+  /** @brief Overload of setOrigin using Arduino String. */
+  inline void setOrigin(const String& name, const String& sw_version = String(), const String& url = String()) {
+    setOrigin(name.c_str(), sw_version.c_str(), url.c_str());
+  }
+
+  /** @brief Overload of removeEntity using Arduino String. */
+  inline bool removeEntity(const String& component, const String& object_id) {
+    return removeEntity(component.c_str(), object_id.c_str());
+  }
+  /** @brief Overload of removeEntity using Arduino String for object_id. */
+  inline bool removeEntity(const char* component, const String& object_id) {
+    return removeEntity(component, object_id.c_str());
+  }
+
+  /** @brief Overload of publishState using Arduino String. */
+  inline bool publishState(const String& object_id, const String& payload, bool retained = false, uint8_t qos = 0) {
+    return publishState(object_id.c_str(), payload.c_str(), retained, qos);
+  }
+  /** @brief Overload of publishState using Arduino String for object_id. */
+  inline bool publishState(const String& object_id, const char* payload, bool retained = false, uint8_t qos = 0) {
+    return publishState(object_id.c_str(), payload, retained, qos);
+  }
+  /** @brief Overload of publishState using Arduino String for payload. */
+  inline bool publishState(const char* object_id, const String& payload, bool retained = false, uint8_t qos = 0) {
+    return publishState(object_id, payload.c_str(), retained, qos);
+  }
+
+  /** @brief Overload of publishStateSwitch using Arduino String. */
+  inline bool publishStateSwitch(const String& object_id, bool on, bool retained = false, uint8_t qos = 0) {
+    return publishStateSwitch(object_id.c_str(), on, retained, qos);
+  }
+  /** @brief Overload of publishStateNumber using Arduino String. */
+  inline bool publishStateNumber(const String& object_id, double value, uint8_t decimals = 2, bool retained = false, uint8_t qos = 0) {
+    return publishStateNumber(object_id.c_str(), value, decimals, retained, qos);
+  }
+  /** @brief Overload of publishStateLight using Arduino String. */
+  inline bool publishStateLight(const String& object_id, const HaLightState& state, bool retained = false, uint8_t qos = 0) {
+    return publishStateLight(object_id.c_str(), state, retained, qos);
+  }
+  /** @brief Overload of publishStatePosition using Arduino String. */
+  inline bool publishStatePosition(const String& object_id, int position, bool retained = false, uint8_t qos = 0) {
+    return publishStatePosition(object_id.c_str(), position, retained, qos);
+  }
+  /** @brief Overload of parseLightCommand using Arduino String. */
+  static bool parseLightCommand(const String& payload, HaLightCommand& out) {
+    return parseLightCommand(payload.c_str(), out);
+  }
+#endif
 
 private:
   /** @brief Lock for the incoming message queue (shared with the AsyncTCP task on ESP32). */

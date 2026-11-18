@@ -39,6 +39,12 @@
  */
 class AsyncMqttClientTransport : public MqttTransport {
 public:
+  // Keep the base class overloads (Arduino String) visible next to the overrides
+  using MqttTransport::setServer;
+  using MqttTransport::connect;
+  using MqttTransport::subscribe;
+  using MqttTransport::publish;
+
   /** @brief How long a connect attempt may take before tick() gives up on it. */
   static constexpr uint32_t CONNECT_TIMEOUT_MS = 15000;
 

@@ -2,6 +2,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
+#ifdef ARDUINO
+#include <Arduino.h>  // String
+#endif
 
 #ifndef NO_JB_LOGGER
 #include <jblogger.h>
@@ -218,6 +221,31 @@ public:
     reconnect.maxDelayMs = maxDelayMs < minDelayMs ? minDelayMs : maxDelayMs;
     reconnect.currentDelayMs = minDelayMs;
   }
+
+#ifdef ARDUINO
+  // Convenience overloads for Arduino String parameters. Transports bring them into
+  // scope with `using MqttTransport::setServer;` etc.
+
+  /** @brief Overload of setServer using Arduino String (empty user/pass = none). */
+  void setServer(const String& host, uint16_t port, const String& user = String(), const String& pass = String()) {
+    setServer(host.c_str(), port, user.length() ? user.c_str() : nullptr, pass.length() ? pass.c_str() : nullptr);
+  }
+
+  /** @brief Overload of connect using Arduino String. */
+  bool connect(const String& clientId) {
+    return connect(clientId.c_str());
+  }
+
+  /** @brief Overload of subscribe using Arduino String. */
+  bool subscribe(const String& topic, uint8_t qos = 0) {
+    return subscribe(topic.c_str(), qos);
+  }
+
+  /** @brief Publish a String payload. */
+  bool publish(const String& topic, const String& payload, bool retained = false, uint8_t qos = 0) {
+    return publish(topic.c_str(), reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length(), retained, qos);
+  }
+#endif
 
   /**
    * @brief Try to reconnect on the next tick(), without waiting for the backoff delay.

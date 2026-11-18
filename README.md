@@ -1,15 +1,33 @@
 # JBHaMqttDiscovery
-An Arduino library for Home Assistant MQTT Auto Discovery.
-
- > This is work in progress!
+An Arduino library for Home Assistant MQTT Discovery on ESP8266 and ESP32.
 
 ## What is this library?
-**JBHaMqttDiscovery** makes sensors and devices connected to Arduino/ESP8266/ESP32 devices show up automatically in **Home Assistant** via **MQTT Discovery**.
+**JBHaMqttDiscovery** makes sensors and devices connected to ESP8266 and ESP32 boards show up automatically in **Home Assistant** via **MQTT Discovery**.
 
-It builds a Home Assistant *device discovery* payload with all your entities (sensors, switches, binary sensors, buttons) and publishes it as one **retained** message, so Home Assistant creates the device and its entities without manual UI/YAML setup.
+It builds a Home Assistant *device discovery* payload with all your entities (sensors, binary sensors, switches, buttons, numbers, selects, texts, lights and covers) and publishes it as one **retained** message, so Home Assistant creates the device and its entities without manual UI/YAML setup.
 It also handles availability, commands from Home Assistant, reconnects and Home Assistant restarts.
 
 It is also **transport-agnostic**: you can use different MQTT client libraries through a small “transport” adapter (PubSubClient, espMqttClient or AsyncMqttClient), while keeping the same discovery API in your firmware.
+
+## Installation
+
+### Arduino IDE
+
+1. Open **Sketch** > **Include Library** > **Manage Libraries...**.
+2. Search for **JBHaMqttDiscovery** and select **Install**. Accept installing the dependencies (ArduinoJson and JBLogger).
+3. Install one MQTT client the same way: **espMqttClient** (recommended), **PubSubClient** or **AsyncMqttClient**.
+
+### PlatformIO
+
+Add the library and one MQTT client to `platformio.ini`:
+
+```ini
+lib_deps =
+    jonnybergdahl/JBHaMqttDiscovery@^1.0.0
+    bertmelis/espMqttClient
+```
+
+The examples are in `examples/` and under **File** > **Examples** > **JBHaMqttDiscovery** in the Arduino IDE.
 
 ## Usage
 
@@ -82,6 +100,28 @@ void loop() {
 | **AsyncMqttClient** | Not maintained since 2019. Supported for existing projects; the transport works around its connect bug. |
 
 All three behave the same through the library: the same API, auto-reconnect, Last Will and commands.
+
+### Running without a computer
+
+Devices usually run from a power supply, with nothing connected to the USB port. So don't wait for the serial port in `setup()`: `while (!Serial) {}` never ends on boards with native USB. The examples wait at most 2 seconds:
+
+```c++
+Serial.begin(115200);
+unsigned long serialStart = millis();
+while (!Serial && millis() - serialStart < 2000) {
+  delay(10);
+}
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+// ESP32 native USB (USB-Serial/JTAG, e.g. ESP32-S3/C3): drop log output when no
+// computer reads it. Otherwise each log line can block, and loop() slows to a crawl.
+Serial.setTxTimeoutMs(0);
+#endif
+```
+
+### Arduino String
+
+All functions that take text also accept Arduino `String` (and `std::string`), e.g. `ha.publishState("temperature", String(t, 1))` or `transport.connect(nodeId)`.
+The config structs (`HaDeviceInfo`, `HaSensorConfig`, ...) take `const char*`; pass `myString.c_str()`. The library copies the text, so local Strings are fine.
 
 ### espMqttClient (recommended)
 

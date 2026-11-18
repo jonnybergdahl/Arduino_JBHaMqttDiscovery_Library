@@ -1,0 +1,47 @@
+{
+  "name": "JBHaMqttDiscovery",
+  "version": "1.0.0",
+  "description": "Home Assistant MQTT device discovery for ESP8266 and ESP32: sensors, binary sensors, switches, buttons, numbers, selects, texts, lights and covers, with commands, availability and auto-reconnect. Works with espMqttClient, PubSubClient and AsyncMqttClient.",
+  "keywords": "home assistant, homeassistant, mqtt, discovery, autodiscovery, esp8266, esp32, iot",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git"
+  },
+  "authors": [
+    {
+      "name": "Jonny Bergdahl",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery",
+  "frameworks": "arduino",
+  "platforms": ["espressif8266", "espressif32"],
+  "headers": "HaDiscovery.h",
+  "dependencies": [
+    {
+      "owner": "bblanchon",
+      "name": "ArduinoJson",
+      "version": "^7.0.0"
+    },
+    {
+      "owner": "jonnybergdahl",
+      "name": "JBLogger",
+      "version": "^1.0.6"
+    }
+  ],
+  "export": {
+    "exclude": [
+      ".github",
+      ".idea",
+      ".pio",
+      "docs",
+      "hwtest",
+      "test",
+      "Doxyfile",
+      "build.sh",
+      "copy.sh",
+      "platformio.ini"
+    ]
+  }
+}

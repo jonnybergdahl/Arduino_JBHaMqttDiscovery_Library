@@ -21,8 +21,6 @@ mkdir -p "$DEST_DIR"
 # Copy src directory
 if [ -d "src" ]; then
     cp -R src/* "$DEST_DIR/"
-    # Remove main.cpp if it exists in the destination (often used for testing in PIO)
-    [ -f "$DEST_DIR/main.cpp" ] && rm "$DEST_DIR/main.cpp"
 fi
 
 # Copy examples directory
