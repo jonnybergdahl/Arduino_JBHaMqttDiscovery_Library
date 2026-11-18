@@ -20,6 +20,7 @@ MqttTransport	KEYWORD1
 ReconnectBackoff	KEYWORD1
 PubSubClientTransport	KEYWORD1
 AsyncMqttClientTransport	KEYWORD1
+EspMqttClientTransport	KEYWORD1
 HaCommandCallback	KEYWORD1
 
 setDevice	KEYWORD2

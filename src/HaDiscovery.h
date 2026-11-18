@@ -22,7 +22,7 @@
  * @brief Publish Home Assistant MQTT Discovery config payloads via an abstract MQTT transport.
  *
  * This module builds a Home Assistant MQTT device discovery payload and publishes it
- * using a transport adapter (e.g. PubSubClient or AsyncMqttClient).
+ * using a transport adapter (PubSubClient, espMqttClient or AsyncMqttClient).
  *
  * Key behaviors:
  * - Publishes one retained device discovery payload with all entities as components,

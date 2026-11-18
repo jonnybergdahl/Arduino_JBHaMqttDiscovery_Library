@@ -9,14 +9,14 @@ An Arduino library for Home Assistant MQTT Auto Discovery.
 It builds a Home Assistant *device discovery* payload with all your entities (sensors, switches, binary sensors, buttons) and publishes it as one **retained** message, so Home Assistant creates the device and its entities without manual UI/YAML setup.
 It also handles availability, commands from Home Assistant, reconnects and Home Assistant restarts.
 
-It is also **transport-agnostic**: you can use different MQTT client libraries through a small “transport” adapter (e.g. PubSubClient or AsyncMqttClient), while keeping the same discovery API in your firmware.
+It is also **transport-agnostic**: you can use different MQTT client libraries through a small “transport” adapter (PubSubClient, espMqttClient or AsyncMqttClient), while keeping the same discovery API in your firmware.
 
 ## Usage
 
 ### Dependencies
 
 1. [ArduinoJson](https://arduinojson.org/)
-2. [PubSubClient](https://pubsubclient.knolleary.net/) or [AsyncMqttClient](https://github.com/marvinroger/async-mqtt-client)
+2. One MQTT client: [PubSubClient](https://pubsubclient.knolleary.net/), [espMqttClient](https://github.com/bertmelis/espMqttClient) or [AsyncMqttClient](https://github.com/marvinroger/async-mqtt-client)
 3. [JBLogger](https://github.com/jonnybergdahl/Arduino_JBLogger_Library)
 
 ### PubSubClient (polling required)
@@ -72,6 +72,49 @@ void loop() {
 > PubSubClient's default 256 byte buffer is too small for the discovery payload, which is about 400 bytes plus 150–250 bytes per entity.
 > `PubSubClientTransport` raises it to 2048 bytes in `setServer()`, and grows it further if a publish needs more.
 > Pass a different minimum as the second constructor argument, e.g. `PubSubClientTransport transport(mqtt, 4096);`.
+
+### Which MQTT client?
+
+| Client | Notes |
+|---|---|
+| **espMqttClient** | Maintained, the best choice for new projects. Sends large payloads in chunks, so it needs the least memory. ESP8266 and ESP32. |
+| **PubSubClient** | Simple and widely used. Needs a buffer as large as the whole discovery payload, and reconnect attempts block `loop()`. |
+| **AsyncMqttClient** | Not maintained since 2019. Supported for existing projects; the transport works around its connect bug. |
+
+All three behave the same through the library: the same API, auto-reconnect, Last Will and commands.
+
+### espMqttClient (recommended)
+
+```c++
+#include <espMqttClient.h>
+#include <HaDiscovery.h>
+#include <transport/EspMqttClientTransport.h>
+
+espMqttClient mqtt;
+EspMqttClientTransport<espMqttClient> transport(mqtt);
+HaDiscovery ha(transport);
+
+void setup() {
+  // ... Wi-Fi, ha.setDevice(...), ha.onCommand(...)
+  transport.setServer("mqtt-broker.local", 1883, "user", "pass");
+  transport.connect(nodeId.c_str());
+  // ... publish*Discovery(...)
+}
+
+void loop() {
+  ha.tick(); // REQUIRED: runs the client, publishes discovery, handles commands, reconnects
+}
+```
+
+`EspMqttClientTransport` works with `espMqttClient`, `espMqttClientSecure` (TLS) and `espMqttClientAsync`; pass the class as the template parameter.
+Who runs the client's `loop()` depends on the client:
+
+- `espMqttClient` on **ESP8266**: `ha.tick()` does. That's the default there.
+- `espMqttClient` on **ESP32**: its own task does, so `ha.tick()` must not. That's the default there. If you create it with `espMqttClientTypes::UseInternalTask::NO`, use `EspMqttClientTransport<espMqttClient> transport(mqtt, true);`.
+- `espMqttClientAsync`: its network callbacks do. On ESP8266, use `EspMqttClientTransport<espMqttClientAsync> transport(mqtt, false);`.
+
+> The transport takes over espMqttClient's `onConnect`, `onDisconnect` and `onMessage` callbacks.
+> espMqttClient refuses to publish when free heap drops below 16 KB (`EMC_MIN_FREE_MEMORY`); the transport logs it as a failed publish.
 
 ### AsyncMqttClient (event-driven, no polling required)
 ```c++

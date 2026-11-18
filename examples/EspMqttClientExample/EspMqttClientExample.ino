@@ -1,0 +1,110 @@
+#ifdef ARDUINO_ARCH_ESP8266
+#include <ESP8266WiFi.h>
+#endif  // ARDUINO_ARCH_ESP8266
+
+#ifdef ARDUINO_ARCH_ESP32
+#include <WiFi.h>
+#endif  // ARDUINO_ARCH_ESP32
+// espMqttClient (https://github.com/bertmelis/espMqttClient) is a maintained successor
+// of AsyncMqttClient. espMqttClient uses the normal WiFiClient; use espMqttClientAsync
+// from <espMqttClientAsync.h> for the AsyncTCP-based version.
+#include <espMqttClient.h>
+#include <HaDiscovery.h>
+#include <transport/EspMqttClientTransport.h>
+#ifndef NO_JB_LOGGER
+#include <jblogger.h>
+#else
+#include <JBLoggerDummy.h>
+#endif
+
+const char* ssid = "your-ssid";
+const char* password = "your-password";
+const char* mqtt_host = "your-mqtt-server";
+const char* mqtt_user = "your-mqtt-user";
+const char* mqtt_pass = "your-mqtt-password";
+
+espMqttClient mqtt;
+// On ESP8266 tick() runs the client's loop(); on ESP32 the client runs its own task
+EspMqttClientTransport<espMqttClient> transport(mqtt);
+HaDiscovery ha(transport);
+JBLogger logger("Main");
+
+// Reconnect MQTT right away when Wi-Fi comes back, instead of waiting for the next retry
+#ifdef ARDUINO_ARCH_ESP8266
+WiFiEventHandler gotIpHandler;
+#endif
+
+void watchWiFi() {
+#ifdef ARDUINO_ARCH_ESP8266
+  gotIpHandler = WiFi.onStationModeGotIP([](const WiFiEventStationModeGotIP&) { transport.reconnectNow(); });
+#endif
+#ifdef ARDUINO_ARCH_ESP32
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) { transport.reconnectNow(); }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+#endif
+}
+
+// Called when Home Assistant sends a command
+void onCommand(const char* objectId, const char* payload) {
+  logger.info("Command for %s: %s", objectId, payload);
+  if (strcmp(objectId, "relay1") == 0) {
+    bool on = strcmp(payload, "ON") == 0;
+    // Switch the real relay here, then report the new state back
+    ha.publishStateSwitch("relay1", on);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  logger.setLogLevel(LOG_LEVEL_DEBUG);
+  ha.setLogLevel(LOG_LEVEL_DEBUG);
+
+  logger.info("Connecting to WiFi...");
+  watchWiFi();
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+  logger.info("WiFi connected");
+
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  String nodeId = "esp32_" + mac;
+
+  ha.setDevice({
+    .node_id = nodeId.c_str(),
+    .name = "Kitchen Node",
+    .manufacturer = "YourBrand",
+    .model = "ESP32",
+    .sw_version = "1.0.0",
+    .identifiers = mac.c_str()
+  });
+
+  transport.setServer(mqtt_host, 1883, mqtt_user, mqtt_pass);
+  ha.onCommand(onCommand);
+  // Connect through the transport so the Last Will and credentials are used
+  transport.connect(nodeId.c_str());
+
+  HaSensorConfig temp{
+    .common = { .object_id="temperature", .name="Temperature" },
+    .unit_of_measurement="°C",
+    .device_class="temperature",
+    .state_class="measurement"
+  };
+  ha.publishSensorDiscovery(temp);
+
+  HaSwitchConfig relay{
+    .common = { .object_id="relay1", .name="Light" }
+  };
+  ha.publishSwitchDiscovery(relay);
+}
+
+void loop() {
+  ha.tick();  // REQUIRED: runs the client, publishes discovery, handles commands, reconnects
+
+  static unsigned long lastMsg = 0;
+  if (millis() - lastMsg > 5000) {
+    lastMsg = millis();
+    ha.publishState("temperature", "23.5");
+  }
+}

@@ -34,12 +34,18 @@ static const char* kModel = "TinyS3";
 #include <jblogger.h>
 #include "secrets.h"
 
-#ifdef USE_ASYNC
+#if defined(USE_ASYNC)
 #include <AsyncMqttClient.h>
 #include <transport/AsyncMqttClientTransport.h>
 AsyncMqttClient mqtt;
 AsyncMqttClientTransport transport(mqtt);
 static const char* kTransportName = "AsyncMqttClient";
+#elif defined(USE_ESPMQTT)
+#include <espMqttClient.h>
+#include <transport/EspMqttClientTransport.h>
+espMqttClient mqtt;
+EspMqttClientTransport<espMqttClient> transport(mqtt);
+static const char* kTransportName = "espMqttClient";
 #else
 #include <PubSubClient.h>
 #include <transport/PubSubClientTransport.h>
@@ -321,7 +327,7 @@ void handleSerial() {
       ha.republishAll();
     } else if (cmd == "mqttdrop") {
       // Close the socket underneath the client, like a broker restart
-#ifdef USE_ASYNC
+#if defined(USE_ASYNC) || defined(USE_ESPMQTT)
       mqtt.disconnect(true);
 #else
       wifiClient.stop();
@@ -436,8 +442,8 @@ void setup() {
 }
 
 void loop() {
-#ifndef USE_ASYNC
-  mqtt.loop();
+#if !defined(USE_ASYNC) && !defined(USE_ESPMQTT)
+  mqtt.loop();  // PubSubClient; the espMqttClient transport runs its client from tick()
 #endif
   ha.tick();
   handleSerial();
