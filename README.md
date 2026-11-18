@@ -29,6 +29,14 @@ lib_deps =
     bertmelis/espMqttClient
 ```
 
+> The library isn't in the PlatformIO registry yet. Until it is, install it straight from GitHub instead:
+>
+> ```ini
+> lib_deps =
+>     https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git#v1.0.0
+>     bertmelis/espMqttClient
+> ```
+
 The examples are in `examples/` and under **File** > **Examples** > **JBHaMqttDiscovery** in the Arduino IDE.
 
 ## Usage
