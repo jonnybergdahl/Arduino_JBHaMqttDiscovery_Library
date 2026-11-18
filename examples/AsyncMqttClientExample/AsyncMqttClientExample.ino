@@ -81,6 +81,8 @@ void setup() {
 }
 
 void loop() {
+  ha.tick();  // Re-publishes discovery after Home Assistant restarts
+
   static unsigned long lastMsg = 0;
   if (millis() - lastMsg > 5000) {
     lastMsg = millis();

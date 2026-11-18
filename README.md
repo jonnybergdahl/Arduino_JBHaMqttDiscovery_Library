@@ -64,7 +64,7 @@ void setup() {
 
 void loop() {
   mqtt.loop(); // REQUIRED
-  ha.tick();   // Recommended: enables auto "on-connect" availability publish
+  ha.tick();   // REQUIRED: detects (re)connects and Home Assistant restarts
 }
 ```
 
@@ -116,7 +116,7 @@ void setup() {
 }
 
 void loop() {
-  // nothing required for HaDiscovery
+  ha.tick(); // Re-publishes discovery after Home Assistant restarts
 }
 ```
 
@@ -127,6 +127,21 @@ When the connection comes up, the library publishes `online` there.
 If the device loses power or network, the broker publishes `offline` and Home Assistant marks its entities unavailable.
 
 Call `setDevice()` before connecting, and connect through the transport (`transport.connect(...)`), not the MQTT client, so the will is sent.
+
+## Reconnects and Home Assistant restarts
+
+The library keeps every discovery config you publish, and the last state of each entity.
+It sends them again:
+
+- every time the MQTT connection comes up, and
+- when Home Assistant comes back online (it publishes `online` on `homeassistant/status`), after a random delay of up to 5 seconds so many devices don't publish at once. Change it with `ha.setRepublishDelay(ms)`.
+
+Discovery configs and states published while disconnected are kept and sent when the connection comes up.
+So you can publish them in `setup()` right after `connect()`, even with AsyncMqttClient, which connects in the background.
+
+Call `ha.republishAll()` to send everything again yourself.
+
+> Each entity's config is kept in RAM (about 300–500 bytes each).
 
 ## Commands from Home Assistant
 

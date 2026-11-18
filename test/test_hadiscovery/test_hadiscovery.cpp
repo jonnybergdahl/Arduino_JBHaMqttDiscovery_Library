@@ -339,15 +339,18 @@ void test_subscribe_waits_for_connect(void) {
 
     transport.isConnected = true;
     transport.fireConnect();
-    TEST_ASSERT_EQUAL(1, transport.subscriptions.size());
-    TEST_ASSERT_EQUAL_STRING("devices/test_node/relay/set", transport.subscriptions[0].c_str());
+    discovery->tick();
+    TEST_ASSERT_EQUAL(2, transport.subscriptions.size());
+    TEST_ASSERT_EQUAL_STRING("homeassistant/status", transport.subscriptions[0].c_str());
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/relay/set", transport.subscriptions[1].c_str());
 
     // And again after a reconnect, without duplicating the route
     transport.subscriptions.clear();
     discovery->publishSwitchDiscovery(cfg);
     transport.subscriptions.clear();
     transport.fireConnect();
-    TEST_ASSERT_EQUAL(1, transport.subscriptions.size());
+    discovery->tick();
+    TEST_ASSERT_EQUAL(2, transport.subscriptions.size());
 }
 
 void test_removed_switch_stops_commands(void) {
@@ -359,6 +362,116 @@ void test_removed_switch_stops_commands(void) {
 
     transport.deliver("devices/test_node/relay/set", "ON");
     TEST_ASSERT_EQUAL(0, commands.size());
+}
+
+static void publishSensorAndState() {
+    HaSensorConfig cfg;
+    cfg.common.object_id = "temp";
+    discovery->publishSensorDiscovery(cfg);
+    discovery->publishState("temp", "20.0");
+}
+
+static void assertConfigOnlineState(size_t offset) {
+    TEST_ASSERT_EQUAL(offset + 3, transport.messages.size());
+    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/test_node/temp/config", transport.messages[offset].topic.c_str());
+    TEST_ASSERT_TRUE(transport.messages[offset].retained);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/status", transport.messages[offset + 1].topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("online", transport.messages[offset + 1].payload.c_str());
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/temp/state", transport.messages[offset + 2].topic.c_str());
+}
+
+void test_publish_while_disconnected_is_deferred(void) {
+    transport.isConnected = false;
+    HaSensorConfig cfg;
+    cfg.common.object_id = "temp";
+    TEST_ASSERT_TRUE(discovery->publishSensorDiscovery(cfg));
+    TEST_ASSERT_TRUE(discovery->publishState("temp", "20.0"));
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+
+    transport.isConnected = true;
+    transport.fireConnect();
+    discovery->tick();
+    assertConfigOnlineState(0);
+    TEST_ASSERT_EQUAL_STRING("20.0", transport.messages[2].payload.c_str());
+}
+
+void test_reconnect_republishes_last_state(void) {
+    publishSensorAndState();
+    discovery->publishState("temp", "21.5");
+    transport.clear();
+
+    transport.fireConnect();
+    discovery->tick();
+    assertConfigOnlineState(0);
+    TEST_ASSERT_EQUAL_STRING("21.5", transport.messages[2].payload.c_str());
+}
+
+void test_birth_message_republishes_on_tick(void) {
+    discovery->setRepublishDelay(0);
+    publishSensorAndState();
+    transport.clear();
+
+    transport.deliver("homeassistant/status", "online");
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+
+    discovery->tick();
+    assertConfigOnlineState(0);
+
+    // Only once
+    transport.clear();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+}
+
+void test_birth_message_waits_for_delay(void) {
+    discovery->setRepublishDelay(60000);
+    publishSensorAndState();
+    transport.clear();
+
+    // rand() could pick 0, so try a few birth messages until one is delayed
+    for (int i = 0; i < 5; i++) {
+        transport.deliver("homeassistant/status", "online");
+        discovery->tick();
+        if (transport.messages.empty()) {
+            return;
+        }
+        transport.clear();
+    }
+    TEST_FAIL_MESSAGE("Republish was never delayed");
+}
+
+void test_birth_offline_ignored(void) {
+    discovery->setRepublishDelay(0);
+    publishSensorAndState();
+    transport.clear();
+
+    transport.deliver("homeassistant/status", "offline");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+}
+
+void test_publish_during_pending_connect_sent_once(void) {
+    transport.fireConnect();          // connect reported, tick() not run yet
+    publishSensorAndState();          // like setup() right after connect()
+    TEST_ASSERT_EQUAL(0, transport.messages.size());
+
+    discovery->tick();
+    assertConfigOnlineState(0);
+
+    // Publishing now goes straight out
+    discovery->publishState("temp", "22.0");
+    TEST_ASSERT_EQUAL(4, transport.messages.size());
+}
+
+void test_removed_entity_not_republished(void) {
+    publishSensorAndState();
+    discovery->removeEntity("sensor", "temp");
+    transport.clear();
+
+    transport.fireConnect();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.messages.size());
+    TEST_ASSERT_EQUAL_STRING("online", transport.messages[0].payload.c_str());
 }
 
 // Support for native environment where setup/loop might not be enough for unity runner
@@ -383,6 +496,13 @@ void setup() {
     RUN_TEST(test_unknown_topic_ignored);
     RUN_TEST(test_subscribe_waits_for_connect);
     RUN_TEST(test_removed_switch_stops_commands);
+    RUN_TEST(test_publish_while_disconnected_is_deferred);
+    RUN_TEST(test_reconnect_republishes_last_state);
+    RUN_TEST(test_birth_message_republishes_on_tick);
+    RUN_TEST(test_birth_message_waits_for_delay);
+    RUN_TEST(test_birth_offline_ignored);
+    RUN_TEST(test_publish_during_pending_connect_sent_once);
+    RUN_TEST(test_removed_entity_not_republished);
     UNITY_END();
 }
 
@@ -407,6 +527,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_unknown_topic_ignored);
     RUN_TEST(test_subscribe_waits_for_connect);
     RUN_TEST(test_removed_switch_stops_commands);
+    RUN_TEST(test_publish_while_disconnected_is_deferred);
+    RUN_TEST(test_reconnect_republishes_last_state);
+    RUN_TEST(test_birth_message_republishes_on_tick);
+    RUN_TEST(test_birth_message_waits_for_delay);
+    RUN_TEST(test_birth_offline_ignored);
+    RUN_TEST(test_publish_during_pending_connect_sent_once);
+    RUN_TEST(test_removed_entity_not_republished);
     return UNITY_END();
 }
 #endif

@@ -12,6 +12,8 @@ HaCommandCallback	KEYWORD1
 
 setDevice	KEYWORD2
 onCommand	KEYWORD2
+republishAll	KEYWORD2
+setRepublishDelay	KEYWORD2
 setLogLevel	KEYWORD2
 setServer	KEYWORD2
 connect	KEYWORD2

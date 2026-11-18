@@ -18,6 +18,8 @@
  * - Publishes retained Discovery config messages
  * - Publishes availability ("online"/"offline") and sets "offline" as the MQTT Last Will
  * - Subscribes to switch and button command topics and passes commands to a handler
+ * - Remembers published configs and states, and sends them again on every connect
+ *   and when Home Assistant comes back online (birth message on `<discovery_prefix>/status`)
  * - Provides default topic conventions with per-entity overrides
  * - Supports removal of entities by publishing an empty retained config payload
  *
@@ -177,8 +179,12 @@ using HaCommandCallback = std::function<void(const char* object_id, const char* 
  * - Publish discovery configs (retained)
  * - Publish states as needed
  *
- * For async transports, onConnect is invoked automatically.
- * For sync transports, call tick() periodically to detect reconnection transitions.
+ * Call tick() from loop() with every transport. Sync transports need it to detect
+ * connection changes, and it sends the configs again after Home Assistant restarts.
+ *
+ * Discovery configs and states published while disconnected are stored and sent
+ * when the connection comes up. Each entity's config JSON (about 300–500 bytes)
+ * is kept in RAM for this.
  */
 class HaDiscovery {
 public:
@@ -232,12 +238,33 @@ public:
   void onCommand(HaCommandCallback cb);
 
   /**
-   * @brief Periodic processing hook.
+   * @brief Periodic processing hook. Call this from loop().
    *
-   * For synchronous MQTT clients (e.g. PubSubClient), call this from loop().
-   * For asynchronous clients, this is typically not required but harmless.
+   * Drives synchronous transports (e.g. PubSubClient). After a connect it subscribes
+   * to the command topics and sends the stored configs and states. It also sends them
+   * once the random delay after a Home Assistant birth message has passed.
+   *
+   * All publishing happens here, in loop(), even when the transport reports
+   * connections from another task (AsyncMqttClient on ESP32).
    */
   void tick();
+
+  /**
+   * @brief Set the maximum random delay before re-publishing after Home Assistant comes online.
+   *
+   * Home Assistant recommends a random delay so many devices don't publish at once.
+   *
+   * @param maxDelayMs Maximum delay in milliseconds (default 5000, 0 = next tick())
+   */
+  void setRepublishDelay(uint32_t maxDelayMs);
+
+  /**
+   * @brief Publish all stored discovery configs, availability "online" and the last states now.
+   *
+   * This happens automatically on every connect and after a Home Assistant birth message.
+   * Does nothing while disconnected.
+   */
+  void republishAll();
 
   /**
    * @brief Publish "online" availability payload to the availability topic (retained by default).
@@ -261,7 +288,8 @@ public:
    * @param cfg      Sensor configuration
    * @param retained Retain flag (recommended true)
    * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return true if publish was accepted by transport, false otherwise
+   * @return false if the config is invalid or the publish failed. While disconnected the
+   *         config is stored and sent on connect, and this returns true.
    */
   bool publishSensorDiscovery(const HaSensorConfig& cfg, bool retained = true, uint8_t qos = 1);
 
@@ -271,7 +299,8 @@ public:
    * @param cfg      Switch configuration
    * @param retained Retain flag (recommended true)
    * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return true if publish was accepted by transport, false otherwise
+   * @return false if the config is invalid or the publish failed. While disconnected the
+   *         config is stored and sent on connect, and this returns true.
    */
   bool publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retained = true, uint8_t qos = 1);
 
@@ -281,7 +310,8 @@ public:
    * @param cfg      Binary sensor configuration
    * @param retained Retain flag (recommended true)
    * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return true if publish was accepted by transport, false otherwise
+   * @return false if the config is invalid or the publish failed. While disconnected the
+   *         config is stored and sent on connect, and this returns true.
    */
   bool publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained = true, uint8_t qos = 1);
 
@@ -291,7 +321,8 @@ public:
    * @param cfg      Button configuration
    * @param retained Retain flag (recommended true)
    * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return true if publish was accepted by transport, false otherwise
+   * @return false if the config is invalid or the publish failed. While disconnected the
+   *         config is stored and sent on connect, and this returns true.
    */
   bool publishButtonDiscovery(const HaButtonConfig& cfg, bool retained = true, uint8_t qos = 1);
 
@@ -312,6 +343,9 @@ public:
 
   /**
    * @brief Publish an entity state payload using default state topic for object_id.
+   *
+   * The last payload per entity is stored and sent again on connect and after a
+   * Home Assistant restart. While disconnected it is only stored, and this returns true.
    *
    * @param object_id Entity object_id
    * @param payload   Null-terminated payload string
@@ -404,6 +438,10 @@ private:
   std::string buildDefaultAvailabilityTopic() const;
 
   bool publishConfigJson(const char* topic, const char* json, bool retained, uint8_t qos);
+  bool storeAndPublishConfig(const char* component, const char* object_id,
+                             const char* json, bool retained, uint8_t qos);
+  std::string buildBirthTopic() const;
+  bool canPublishNow() const;
 
   bool buildSensorConfigJson(char* out, size_t outLen, const HaSensorConfig& cfg) const;
   bool buildSwitchConfigJson(char* out, size_t outLen, const HaSwitchConfig& cfg) const;
@@ -435,8 +473,34 @@ private:
 
   JBLogger _log;
   DeviceData _device;
+  /** @brief A published discovery config, kept for re-publishing. */
+  struct EntityConfig {
+    std::string component;
+    std::string object_id;
+    std::string topic;
+    std::string json;
+    bool retained;
+    uint8_t qos;
+  };
+
+  /** @brief The last state published on a topic, kept for re-publishing. */
+  struct StateEntry {
+    std::string topic;
+    std::string payload;
+    bool retained;
+    uint8_t qos;
+  };
+
   std::vector<CommandRoute> _commands;
+  std::vector<EntityConfig> _entities;
+  std::vector<StateEntry> _states;
   HaCommandCallback _onCommand;
+
+  // Set from the network task with AsyncMqttClient, read in tick()
+  volatile bool _connectPending = false;
+  volatile bool _republishPending = false;
+  volatile uint32_t _republishAt = 0;
+  uint32_t _republishDelayMaxMs = 5000;
 
   static constexpr size_t JSON_BUF = 768;
 };

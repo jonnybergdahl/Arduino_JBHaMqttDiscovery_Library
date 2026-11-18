@@ -78,7 +78,8 @@ public:
   /**
    * @inheritdoc
    *
-   * Blocks until the broker answers or the connection fails.
+   * Blocks until the broker answers or the connection fails. On success the
+   * onConnect callback is called before this returns.
    */
   bool connect(const char* clientId = nullptr) override {
     if (!clientId || !*clientId) {
@@ -95,8 +96,15 @@ public:
     bool ok = client.connect(clientId, user, pass, willTopic, willQos, willRetain, willMessage);
     if (!ok) {
       if (log) log->error("PubSub connect FAILED, state=%d", client.state());
+      return false;
     }
-    return ok;
+
+    // Report the connection now, so the next tick() doesn't have to detect it
+    wasConnected = true;
+    if (cb) {
+      cb(ctx);
+    }
+    return true;
   }
 
   /**

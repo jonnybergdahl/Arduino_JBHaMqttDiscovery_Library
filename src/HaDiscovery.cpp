@@ -3,6 +3,20 @@
 #include <string.h>
 #include <ArduinoJson.h>
 
+#ifdef ARDUINO
+#include <Arduino.h>
+static uint32_t nowMs() { return millis(); }
+static uint32_t randomMs(uint32_t max) { return max ? static_cast<uint32_t>(random(static_cast<long>(max) + 1)) : 0; }
+#else
+#include <chrono>
+#include <cstdlib>
+static uint32_t nowMs() {
+  using namespace std::chrono;
+  return static_cast<uint32_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+}
+static uint32_t randomMs(uint32_t max) { return max ? static_cast<uint32_t>(rand()) % (max + 1) : 0; }
+#endif
+
 // The logger header itself is included through transport/MqttTransport.h
 #ifndef NO_JB_LOGGER
 #define HAS_LOG
@@ -50,8 +64,65 @@ void HaDiscovery::onCommand(HaCommandCallback cb) {
   _onCommand = cb;
 }
 
+void HaDiscovery::setRepublishDelay(uint32_t maxDelayMs) {
+  _republishDelayMaxMs = maxDelayMs;
+}
+
+bool HaDiscovery::canPublishNow() const {
+  // While a connect is pending, tick() is about to send everything anyway
+  return _transport.connected() && !_connectPending;
+}
+
 void HaDiscovery::tick() {
   _transport.tick();
+
+  if (_connectPending) {
+    if (!_transport.connected()) {
+      return;
+    }
+    _connectPending = false;
+    _republishPending = false;
+
+    // Subscriptions don't survive a clean-session reconnect
+    _transport.subscribe(buildBirthTopic().c_str(), 1);
+    for (const CommandRoute& route : _commands) {
+      _transport.subscribe(route.topic.c_str(), 1);
+    }
+
+    // A reconnect may follow a broker restart that lost retained messages,
+    // and anything published while disconnected was only stored
+    republishAll();
+    return;
+  }
+
+  if (_republishPending && static_cast<int32_t>(nowMs() - _republishAt) >= 0) {
+    _republishPending = false;
+    if (_transport.connected()) {
+      republishAll();
+    }
+  }
+}
+
+void HaDiscovery::republishAll() {
+  if (!_transport.connected()) {
+    return;
+  }
+#ifdef HAS_LOG
+  _log.info("Publishing %u discovery configs and %u states",
+            (unsigned)_entities.size(), (unsigned)_states.size());
+#endif
+  // Configs first, so Home Assistant has the entities before their state arrives
+  for (const EntityConfig& e : _entities) {
+    publishConfigJson(e.topic.c_str(), e.json.c_str(), e.retained, e.qos);
+  }
+  publishAvailabilityOnline(true, 1);
+  for (const StateEntry& st : _states) {
+    _transport.publish(st.topic.c_str(),
+                       reinterpret_cast<const uint8_t*>(st.payload.data()),
+                       st.payload.size(),
+                       st.retained,
+                       st.qos);
+  }
 }
 
 void HaDiscovery::onTransportConnectThunk(void* ctx) {
@@ -62,14 +133,9 @@ void HaDiscovery::onTransportConnect() {
 #ifdef HAS_LOG
   _log.info("MQTT Transport connected");
 #endif
-  // Default behavior: publish availability online on connect.
-  // Optional enhancement: re-publish all registered discovery configs.
-  publishAvailabilityOnline(true, 1);
-
-  // Subscriptions don't survive a clean-session reconnect
-  for (const CommandRoute& route : _commands) {
-    _transport.subscribe(route.topic.c_str(), 1);
-  }
+  // With AsyncMqttClient this runs in the network task, so only set a flag.
+  // tick() subscribes and publishes from loop().
+  _connectPending = true;
 }
 
 void HaDiscovery::onTransportMessageThunk(void* ctx, const char* topic, const uint8_t* payload, size_t len) {
@@ -80,6 +146,21 @@ void HaDiscovery::onTransportMessage(const char* topic, const uint8_t* payload, 
   if (!topic) {
     return;
   }
+
+  if (buildBirthTopic() == topic) {
+    // Home Assistant (re)started and has forgotten non-retained state.
+    // Wait a random time so many devices don't all publish at once.
+    if (payload && len == strlen(kAvailOnline) && memcmp(payload, kAvailOnline, len) == 0) {
+      uint32_t delay = randomMs(_republishDelayMaxMs);
+#ifdef HAS_LOG
+      _log.info("Home Assistant is online, publishing discovery in %u ms", (unsigned)delay);
+#endif
+      _republishAt = nowMs() + delay;
+      _republishPending = true;
+    }
+    return;
+  }
+
   for (const CommandRoute& route : _commands) {
     if (route.topic == topic) {
       std::string p = payload ? std::string(reinterpret_cast<const char*>(payload), len) : std::string();
@@ -106,14 +187,14 @@ void HaDiscovery::registerCommandTopic(const std::string& topic, const char* obj
         return;
       }
       route.topic = topic;
-      if (_transport.connected()) {
+      if (canPublishNow()) {
         _transport.subscribe(topic.c_str(), 1);
       }
       return;
     }
   }
   _commands.push_back({topic, object_id});
-  if (_transport.connected()) {
+  if (canPublishNow()) {
     _transport.subscribe(topic.c_str(), 1);
   }
 }
@@ -155,14 +236,15 @@ bool HaDiscovery::publishSensorDiscovery(const HaSensorConfig& cfg, bool retaine
     return false;
   }
 
-  std::string topic = buildConfigTopic("sensor", cfg.common.object_id);
-
   char json[JSON_BUF];
   if (!buildSensorConfigJson(json, sizeof(json), cfg)) {
+#ifdef HAS_LOG
+    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+#endif
     return false;
   }
 
-  return publishConfigJson(topic.c_str(), json, retained, qos);
+  return storeAndPublishConfig("sensor", cfg.common.object_id, json, retained, qos);
 }
 
 bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retained, uint8_t qos) {
@@ -170,10 +252,11 @@ bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retaine
     return false;
   }
 
-  std::string topic = buildConfigTopic("switch", cfg.common.object_id);
-
   char json[JSON_BUF];
   if (!buildSwitchConfigJson(json, sizeof(json), cfg)) {
+#ifdef HAS_LOG
+    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+#endif
     return false;
   }
 
@@ -181,7 +264,7 @@ bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retaine
                          ? std::string(cfg.command_topic_override)
                          : buildDefaultCommandTopic(cfg.common.object_id),
                        cfg.common.object_id);
-  return publishConfigJson(topic.c_str(), json, retained, qos);
+  return storeAndPublishConfig("switch", cfg.common.object_id, json, retained, qos);
 }
 
 bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained, uint8_t qos) {
@@ -189,14 +272,15 @@ bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, 
     return false;
   }
 
-  std::string topic = buildConfigTopic("binary_sensor", cfg.common.object_id);
-
   char json[JSON_BUF];
   if (!buildBinarySensorConfigJson(json, sizeof(json), cfg)) {
+#ifdef HAS_LOG
+    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+#endif
     return false;
   }
 
-  return publishConfigJson(topic.c_str(), json, retained, qos);
+  return storeAndPublishConfig("binary_sensor", cfg.common.object_id, json, retained, qos);
 }
 
 bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retained, uint8_t qos) {
@@ -204,10 +288,11 @@ bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retaine
     return false;
   }
 
-  std::string topic = buildConfigTopic("button", cfg.common.object_id);
-
   char json[JSON_BUF];
   if (!buildButtonConfigJson(json, sizeof(json), cfg)) {
+#ifdef HAS_LOG
+    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+#endif
     return false;
   }
 
@@ -215,7 +300,7 @@ bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retaine
                          ? std::string(cfg.command_topic_override)
                          : buildDefaultCommandTopic(cfg.common.object_id),
                        cfg.common.object_id);
-  return publishConfigJson(topic.c_str(), json, retained, qos);
+  return storeAndPublishConfig("button", cfg.common.object_id, json, retained, qos);
 }
 
 bool HaDiscovery::removeEntity(const char* component, const char* object_id, uint8_t qos) {
@@ -229,6 +314,22 @@ bool HaDiscovery::removeEntity(const char* component, const char* object_id, uin
     unregisterCommandTopics(object_id);
   }
 
+  for (auto it = _entities.begin(); it != _entities.end();) {
+    if (it->component == component && it->object_id == object_id) {
+      it = _entities.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  std::string stateTopic = buildDefaultStateTopic(object_id);
+  for (auto it = _states.begin(); it != _states.end();) {
+    if (it->topic == stateTopic) {
+      it = _states.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
   // Empty retained config payload removes entity in Home Assistant
   return _transport.publish(topic.c_str(), nullptr, 0, true, qos);
 }
@@ -239,6 +340,28 @@ bool HaDiscovery::publishState(const char* object_id, const char* payload, bool 
   }
 
   std::string topic = buildDefaultStateTopic(object_id);
+
+  // Remember the last state so it can be sent again after a reconnect or HA restart
+  bool stored = false;
+  for (StateEntry& st : _states) {
+    if (st.topic == topic) {
+      st.payload = payload;
+      st.retained = retained;
+      st.qos = qos;
+      stored = true;
+      break;
+    }
+  }
+  if (!stored) {
+    _states.push_back({topic, payload, retained, qos});
+  }
+
+  if (!canPublishNow()) {
+#ifdef HAS_LOG
+    _log.debug("Not connected yet, state for %s will be sent on connect", object_id);
+#endif
+    return true;
+  }
 
 #ifdef HAS_LOG
   _log.debug("Publishing state to %s: %s", topic.c_str(), payload);
@@ -273,6 +396,39 @@ std::string HaDiscovery::buildDefaultStateTopic(const char* object_id) const {
 std::string HaDiscovery::buildDefaultCommandTopic(const char* object_id) const {
   // <base>/<node_id>/<object_id>/set
   return _baseTopicPrefix + "/" + _device.node_id + "/" + object_id + "/set";
+}
+
+std::string HaDiscovery::buildBirthTopic() const {
+  // Home Assistant publishes "online"/"offline" here
+  return _discoveryPrefix + "/status";
+}
+
+bool HaDiscovery::storeAndPublishConfig(const char* component, const char* object_id,
+                                        const char* json, bool retained, uint8_t qos) {
+  std::string topic = buildConfigTopic(component, object_id);
+
+  bool stored = false;
+  for (EntityConfig& e : _entities) {
+    if (e.component == component && e.object_id == object_id) {
+      e.topic = topic;
+      e.json = json;
+      e.retained = retained;
+      e.qos = qos;
+      stored = true;
+      break;
+    }
+  }
+  if (!stored) {
+    _entities.push_back({component, object_id, topic, json, retained, qos});
+  }
+
+  if (!canPublishNow()) {
+#ifdef HAS_LOG
+    _log.debug("Not connected yet, %s/%s will be published on connect", component, object_id);
+#endif
+    return true;
+  }
+  return publishConfigJson(topic.c_str(), json, retained, qos);
 }
 
 std::string HaDiscovery::buildDefaultAvailabilityTopic() const {
