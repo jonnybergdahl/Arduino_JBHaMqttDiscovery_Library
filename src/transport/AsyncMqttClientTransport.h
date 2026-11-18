@@ -31,9 +31,17 @@
  * After the first connect(), tick() reconnects when the connection drops (see
  * setAutoReconnect()). Turn this off if your firmware already reconnects with its
  * own timer, as many AsyncMqttClient sketches do.
+ *
+ * AsyncMqttClient ignores a TCP connect that fails right away (e.g. while Wi-Fi is
+ * down): no callback fires and the client stays in its connecting state, ignoring
+ * further connect() calls. tick() therefore gives up on an attempt after
+ * CONNECT_TIMEOUT_MS, resets the client and tries again later.
  */
 class AsyncMqttClientTransport : public MqttTransport {
 public:
+  /** @brief How long a connect attempt may take before tick() gives up on it. */
+  static constexpr uint32_t CONNECT_TIMEOUT_MS = 15000;
+
   /**
    * @brief Construct an AsyncMqttClient transport adapter.
    *
@@ -106,9 +114,21 @@ public:
       if (droppedSession) {
         if (log) log->warning("Async connection lost");
         reconnect.reset(now);   // try again right away
-      } else {
+      } else if (!attemptFailed) {
         if (log) log->error("Async connect FAILED");
+        attemptFailed = true;
         reconnect.failed(now);  // wait before the next attempt
+      }
+    }
+
+    if (connecting && static_cast<int32_t>(now - attemptStartedAt) >= static_cast<int32_t>(CONNECT_TIMEOUT_MS)) {
+      // No onConnect or onDisconnect came: reset the client so connect() works again
+      if (log) log->error("Async connect timed out, resetting the client");
+      connecting = false;
+      client.disconnect(true);
+      if (!attemptFailed) {
+        attemptFailed = true;
+        reconnect.failed(now);
       }
     }
 
@@ -232,6 +252,8 @@ public:
 private:
   void startAttempt() {
     if (log) log->info("Async connecting");
+    attemptStartedAt = millis();
+    attemptFailed = false;
     connecting = true;
     client.connect();
   }
@@ -248,6 +270,8 @@ private:
   volatile bool disconnectEvent = false;
   volatile bool droppedSession = false;
   bool started = false;
+  bool attemptFailed = false;
+  uint32_t attemptStartedAt = 0;
   void (*cb)(void*) = nullptr;
   /** @brief Pointer to user context for callback. */
   void* ctx = nullptr;
