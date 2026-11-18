@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (2026-11-18)
+
+### Fixed
+
+- The states sent with the device payload were lost when Home Assistant was creating the entities for the first time (a new device, or one moved over with `migrateEntityDiscovery()`), so the entities showed `unknown` until the next change or a Home Assistant restart. The stored states now follow the device payload after 2 seconds; states published in the meantime are kept and sent with them. Change the delay with `setStateDelay()`.
+
 ## 1.1.0 (2026-11-18)
 
 - `value_template` on entities (`val_tpl`), so several entities can read their state from one JSON state topic.

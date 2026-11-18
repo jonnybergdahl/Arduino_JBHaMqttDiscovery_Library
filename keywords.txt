@@ -36,6 +36,7 @@ setMaxMessageSize	KEYWORD2
 setOrigin	KEYWORD2
 republishAll	KEYWORD2
 setRepublishDelay	KEYWORD2
+setStateDelay	KEYWORD2
 setLogLevel	KEYWORD2
 setServer	KEYWORD2
 connect	KEYWORD2

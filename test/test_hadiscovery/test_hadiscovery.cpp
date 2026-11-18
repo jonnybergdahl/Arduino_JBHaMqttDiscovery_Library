@@ -143,6 +143,7 @@ void setUp(void) {
     commands.clear();
     discovery = new HaDiscovery(transport, "homeassistant", "devices");
     discovery->setLogLevel(LOG_LEVEL_NONE);
+    discovery->setStateDelay(0);  // states right after the device payload, see test_state_delay_*
 
     HaDeviceInfo dev;
     dev.node_id = "test_node";
@@ -613,6 +614,48 @@ void test_reconnect_republishes_last_state(void) {
     discovery->tick();
     TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
     assertDeviceOnlineState("21.5");
+}
+
+static void sleepMs(int ms);
+
+void test_state_delay_holds_states(void) {
+    discovery->setStateDelay(50);
+    addSensorAndState();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/temp/state").size());
+
+    // Published during the wait: kept, not sent
+    discovery->publishState("temp", "21.0");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/temp/state").size());
+
+    sleepMs(60);
+    discovery->tick();
+    std::vector<MockTransport::Message> states = transport.on("devices/test_node/temp/state");
+    TEST_ASSERT_EQUAL(1, states.size());
+    TEST_ASSERT_EQUAL_STRING("21.0", states[0].payload.c_str());
+
+    // After the wait, states go straight out
+    discovery->publishState("temp", "22.0");
+    TEST_ASSERT_EQUAL(2, transport.on("devices/test_node/temp/state").size());
+}
+
+void test_state_delay_restarts_on_reconnect(void) {
+    discovery->setStateDelay(50);
+    addSensorAndState();
+    discovery->tick();
+
+    // Reconnect before the states were due: they follow the new device payload
+    transport.fireConnect();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(2, transport.on(kDeviceTopic).size());
+    TEST_ASSERT_EQUAL(0, transport.on("devices/test_node/temp/state").size());
+
+    sleepMs(60);
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, transport.on("devices/test_node/temp/state").size());
+    assertDeviceOnlineState("20.0");
 }
 
 void test_publish_during_pending_connect_sent_once(void) {
@@ -1918,6 +1961,8 @@ static void runAll() {
     RUN_TEST(test_publish_while_disconnected_is_deferred);
     RUN_TEST(test_reconnect_republishes_last_state);
     RUN_TEST(test_publish_during_pending_connect_sent_once);
+    RUN_TEST(test_state_delay_holds_states);
+    RUN_TEST(test_state_delay_restarts_on_reconnect);
     RUN_TEST(test_birth_message_republishes_on_tick);
     RUN_TEST(test_birth_message_waits_for_delay);
     RUN_TEST(test_birth_offline_ignored);

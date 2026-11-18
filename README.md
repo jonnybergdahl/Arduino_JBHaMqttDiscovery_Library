@@ -25,7 +25,7 @@ Add the library and one MQTT client to `platformio.ini`:
 
 ```ini
 lib_deps =
-    jonnybergdahl/JBHaMqttDiscovery@^1.1.0
+    jonnybergdahl/JBHaMqttDiscovery@^1.2.0
     bertmelis/espMqttClient
 ```
 
@@ -33,7 +33,7 @@ lib_deps =
 >
 > ```ini
 > lib_deps =
->     https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git#1.1.0
+>     https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git#1.2.0
 >     bertmelis/espMqttClient
 > ```
 
@@ -222,7 +222,12 @@ The library uses Home Assistant's device discovery: one retained payload on `hom
 
 `publishSensorDiscovery()` and the other `publish*Discovery()` calls add or update an entity.
 The payload is published from the next `ha.tick()`, so adding several entities in `setup()` sends one message.
-States published before that are sent right after it.
+States published before that are sent 2 seconds after it.
+
+Home Assistant creates the entities from the device payload in the background, and only then subscribes to their state topics.
+States sent right after the payload are lost on a new device (or one moved over with `migrateEntityDiscovery()`), and its entities show `unknown` until the next change.
+So after every device payload the library holds the stored states for 2 seconds; states published in the meantime are kept and go out with them.
+Change the delay with `ha.setStateDelay(ms)`, or turn it off with `ha.setStateDelay(0)`.
 
 > `node_id` is part of the topic, so it may only contain letters, digits, `_` and `-`.
 

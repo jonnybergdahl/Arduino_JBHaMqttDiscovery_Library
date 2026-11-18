@@ -148,6 +148,10 @@ void HaDiscovery::setRepublishDelay(uint32_t maxDelayMs) {
   _republishDelayMaxMs = maxDelayMs;
 }
 
+void HaDiscovery::setStateDelay(uint32_t delayMs) {
+  _stateDelayMs = delayMs;
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -166,6 +170,7 @@ void HaDiscovery::tick() {
   if (_connectPending) {
     _connectPending = false;
     _republishPending = false;
+    _statesPending = false;  // sent after the next device payload
     _publishRetry = false;  // a new connection, try right away
     // Subscriptions don't survive a clean-session reconnect
     subscribeAll();
@@ -192,6 +197,8 @@ void HaDiscovery::tick() {
   } else if (_republishPending && isDue(now, _republishAt)) {
     _republishPending = false;
     republishAll();
+  } else if (_statesPending && isDue(now, _statesAt)) {
+    publishStoredStates();
   }
 }
 
@@ -214,6 +221,21 @@ void HaDiscovery::republishAll() {
   }
   _publishRetry = false;
   _publishRetryDelayMs = 0;
+  // Home Assistant subscribes to the state topics only once it has created the
+  // entities, so states sent right away are lost on a new or migrated device
+  if (_stateDelayMs > 0) {
+    _statesPending = true;
+    _statesAt = nowMs() + _stateDelayMs;
+    return;
+  }
+  publishStoredStates();
+}
+
+void HaDiscovery::publishStoredStates() {
+  _statesPending = false;
+#ifdef HAS_LOG
+  _log.debug("Publishing %u states", (unsigned)_states.size());
+#endif
   for (const StateEntry& st : _states) {
     _transport.publish(st.topic.c_str(),
                        reinterpret_cast<const uint8_t*>(st.payload.data()),
@@ -682,7 +704,7 @@ void HaDiscovery::publishAvailabilityOffline(bool retained, uint8_t qos) {
 
 bool HaDiscovery::canPublishStateNow() const {
   // While a connect or a device payload is pending, tick() sends the states right after it
-  return _transport.connected() && !_connectPending && !_configDirty && !_migrationWait;
+  return _transport.connected() && !_connectPending && !_configDirty && !_migrationWait && !_statesPending;
 }
 
 bool HaDiscovery::publishState(const char* object_id, const char* payload, bool retained, uint8_t qos) {

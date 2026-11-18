@@ -16,7 +16,7 @@
 /** @brief Library name, sent as the default origin name. */
 #define JBHAMQTTDISCOVERY_NAME "JBHaMqttDiscovery"
 /** @brief Library version, sent as the default origin version. Keep in sync with library.properties. */
-#define JBHAMQTTDISCOVERY_VERSION "1.1.0"
+#define JBHAMQTTDISCOVERY_VERSION "1.2.0"
 /** @brief Library URL, sent as the default origin support URL. */
 #define JBHAMQTTDISCOVERY_URL "https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery"
 
@@ -668,6 +668,8 @@ public:
    * - after a connect: subscribes, then publishes the device payload, "online" and the stored states
    * - after entities were added or removed: publishes the device payload and the stored states
    * - after a Home Assistant birth message and a random delay: publishes everything again
+   *
+   * The stored states follow the device payload after setStateDelay().
    */
   void tick();
 
@@ -681,10 +683,23 @@ public:
   void setRepublishDelay(uint32_t maxDelayMs);
 
   /**
-   * @brief Publish the device payload, availability "online" and the last states now.
+   * @brief Set how long the stored states wait after the device payload.
+   *
+   * Home Assistant creates the entities from the device payload in the background and
+   * only then subscribes to their state topics. States sent right after the payload
+   * are lost on a new or migrated device, and the entities stay unknown until the
+   * next change. States published during the wait are kept and sent with the others.
+   *
+   * @param delayMs Delay in milliseconds (default STATE_DELAY_MS, 0 = right after the payload)
+   */
+  void setStateDelay(uint32_t delayMs);
+
+  /**
+   * @brief Publish the device payload and availability "online" now, and the last states after setStateDelay().
    *
    * This happens automatically on every connect, after entity changes and after a
-   * Home Assistant birth message. Does nothing while disconnected.
+   * Home Assistant birth message. Does nothing while disconnected. With a state delay,
+   * tick() sends the states.
    *
    * If the transport doesn't accept the device payload or availability (for example
    * when the MQTT client is short of memory), tick() tries again after a delay that
@@ -1102,6 +1117,7 @@ private:
   void processMigrationCleanups(uint32_t now);
   bool hasUnsentMigrations() const;
   void schedulePublishRetry(uint32_t now);
+  void publishStoredStates();
   static std::string lightCommandJson(CommandKind kind, const std::string& payload);
 
   void registerCommandTopic(const std::string& topic, const char* object_id, CommandKind kind);
@@ -1188,6 +1204,11 @@ private:
   uint32_t _republishAt = 0;
   uint32_t _republishDelayMaxMs = 5000;
 
+  // setStateDelay(): the stored states wait after the device payload
+  bool _statesPending = false;
+  uint32_t _statesAt = 0;
+  uint32_t _stateDelayMs = STATE_DELAY_MS;
+
   // migrateEntityDiscovery()
   bool _migrate = false;
   bool _migrationWait = false;   // holding the device payload for retained single-component configs
@@ -1208,6 +1229,8 @@ private:
   uint32_t _publishRetryDelayMs = 0;
 
 public:
+  /** @brief Default delay between the device payload and the stored states, see setStateDelay(). */
+  static constexpr uint32_t STATE_DELAY_MS = 2000;
   /** @brief First retry delay after the transport didn't accept the device payload. */
   static constexpr uint32_t PUBLISH_RETRY_MIN_MS = 1000;
   /** @brief The retry delay doubles up to this. */
