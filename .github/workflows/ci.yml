@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: Native unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-native-${{ hashFiles('platformio.ini') }}
+      - run: pip install --upgrade platformio
+      - run: pio test -e native
+
+  examples:
+    name: ${{ matrix.example }} (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [EspMqttClientExample, PubSubClientExample, AsyncMqttClientExample]
+        env: [esp32dev, esp32s3, d1_mini]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+      - run: pip install --upgrade platformio
+      # Builds the example against the library in this repository, like a user would
+      - run: >
+          pio ci "examples/${{ matrix.example }}/${{ matrix.example }}.ino"
+          --lib=. --project-conf=platformio.ini -e ${{ matrix.env }}
+
+  arduino-lint:
+    name: Arduino Library Manager checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/arduino-lint-action@v2
+        with:
+          library-manager: submit
+          compliance: specification

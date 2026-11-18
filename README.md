@@ -1,4 +1,6 @@
 # JBHaMqttDiscovery
+[![CI](https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery/actions/workflows/ci.yml/badge.svg)](https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery/actions/workflows/ci.yml)
+
 An Arduino library for Home Assistant MQTT Discovery on ESP8266 and ESP32.
 
 ## What is this library?
