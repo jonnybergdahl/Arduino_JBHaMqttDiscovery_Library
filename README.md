@@ -67,6 +67,10 @@ void loop() {
 }
 ```
 
+> PubSubClient's default 256 byte buffer is too small for discovery payloads, which are usually 350–500 bytes.
+> `PubSubClientTransport` raises it to 1024 bytes in `setServer()`, and grows it further if a publish needs more.
+> Pass a different minimum as the second constructor argument, e.g. `PubSubClientTransport transport(mqtt, 2048);`.
+
 ### AsyncMqttClient (event-driven, no polling required)
 ```c++
 #include <AsyncMqttClient.h>

@@ -1,6 +1,7 @@
 #pragma once
 #include "MqttTransport.h"
 #include <PubSubClient.h>
+#include <string.h>
 
 /**
  * @defgroup transport MQTT Transports
@@ -15,18 +16,31 @@
  *
  * Limitations:
  * - The host firmware MUST call mqtt.loop() frequently.
+ * - PubSubClient's default 256 byte packet buffer is too small for discovery
+ *   payloads. This transport raises it to at least DEFAULT_BUFFER_SIZE in
+ *   setServer(), and grows it further if a publish needs more.
  * - QoS handling is best-effort.
  * - Connection events are detected via rising-edge logic in tick().
  */
 class PubSubClientTransport : public MqttTransport {
 public:
+  /** @brief Default minimum PubSubClient buffer size in bytes. */
+  static constexpr uint16_t DEFAULT_BUFFER_SIZE = 1024;
+
+  /** @brief Bytes PubSubClient needs besides topic and payload (header + topic length). */
+  static constexpr size_t PACKET_OVERHEAD = 7;
+
   /**
    * @brief Construct a PubSubClient transport adapter.
    *
-   * @param client Reference to an already configured PubSubClient instance
+   * The buffer is not resized here, since this usually runs as a global constructor.
+   * It is resized in setServer().
+   *
+   * @param client     Reference to an already configured PubSubClient instance
+   * @param bufferSize Minimum PubSubClient buffer size in bytes (default DEFAULT_BUFFER_SIZE)
    */
-  explicit PubSubClientTransport(PubSubClient& client)
-    : client(client) {}
+  explicit PubSubClientTransport(PubSubClient& client, uint16_t bufferSize = DEFAULT_BUFFER_SIZE)
+    : client(client), minBufferSize(bufferSize) {}
 
   /**
    * @brief Set MQTT server and credentials.
@@ -38,6 +52,7 @@ public:
    */
   void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) override {
     client.setServer(host, port);
+    ensureBufferSize(minBufferSize);
     this->user = user;
     this->pass = pass;
   }
@@ -52,6 +67,7 @@ public:
    */
   void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") override {
     client.setServer(host.c_str(), port);
+    ensureBufferSize(minBufferSize);
     this->userStr = user;
     this->passStr = pass;
     this->user = this->userStr.c_str();
@@ -75,6 +91,15 @@ public:
                uint8_t /*qos*/) override {
     if (payload == nullptr) {
       len = 0;
+    }
+
+    size_t needed = PACKET_OVERHEAD + strlen(topic) + len;
+    if (needed > client.getBufferSize()) {
+      if (log) log->warning("PubSub buffer too small (%u < %u), growing it", (unsigned)client.getBufferSize(), (unsigned)needed);
+      if (!ensureBufferSize(needed)) {
+        if (log) log->error("PubSub publish FAILED topic=%s, could not grow buffer to %u bytes", topic, (unsigned)needed);
+        return false;
+      }
     }
 
     if (log) log->debug("PubSub publish topic=%s len=%u retained=%d", topic,
@@ -124,7 +149,23 @@ public:
   }
 
 private:
+  /**
+   * @brief Grow the PubSubClient buffer to at least @p size bytes. Never shrinks it.
+   *
+   * @return true if the buffer is now at least @p size bytes
+   */
+  bool ensureBufferSize(size_t size) {
+    if (size > UINT16_MAX) {
+      return false;
+    }
+    if (client.getBufferSize() >= size) {
+      return true;
+    }
+    return client.setBufferSize(static_cast<uint16_t>(size));
+  }
+
   PubSubClient& client;
+  uint16_t minBufferSize;
   const char* user = nullptr;
   const char* pass = nullptr;
   std::string userStr;
