@@ -10,6 +10,41 @@
 #endif
 
 /**
+ * @brief Delay between reconnect attempts, doubling after each failure.
+ *
+ * Time is passed in, so this works the same on Arduino (millis()) and in native tests.
+ */
+struct ReconnectBackoff {
+  /** @brief Whether automatic reconnect is enabled. */
+  bool enabled = true;
+  /** @brief Delay after the first failed attempt, in milliseconds. */
+  uint32_t minDelayMs = 1000;
+  /** @brief Longest delay between attempts, in milliseconds. */
+  uint32_t maxDelayMs = 60000;
+  /** @brief Delay used after the next failure. */
+  uint32_t currentDelayMs = 1000;
+  /** @brief Time of the next allowed attempt. */
+  uint32_t nextAttemptAt = 0;
+
+  /** @brief Start over: allow an attempt right away, and start the delay at minDelayMs. */
+  void reset(uint32_t now) {
+    currentDelayMs = minDelayMs;
+    nextAttemptAt = now;
+  }
+
+  /** @brief Whether an attempt is allowed at @p now. */
+  bool due(uint32_t now) const {
+    return enabled && static_cast<int32_t>(now - nextAttemptAt) >= 0;
+  }
+
+  /** @brief Record a failed attempt and schedule the next one. */
+  void failed(uint32_t now) {
+    nextAttemptAt = now + currentDelayMs;
+    currentDelayMs = currentDelayMs >= maxDelayMs / 2 ? maxDelayMs : currentDelayMs * 2;
+  }
+};
+
+/**
  * @defgroup transport MQTT Transports
  * @brief Transport adapters for different MQTT client libraries.
  * @{
@@ -34,10 +69,11 @@
  * Transports copy every string passed to them, so callers don't need to keep
  * them alive.
  *
- * It does NOT:
- * - manage Wi-Fi
- * - reconnect automatically
- * - perform polling (except via tick() for sync clients)
+ * It does NOT manage Wi-Fi.
+ *
+ * After the first connect(), transports reconnect by themselves from tick() when the
+ * connection drops, waiting longer after each failed attempt. Turn this off with
+ * setAutoReconnect(false) if your firmware reconnects itself.
  */
 class MqttTransport {
 public:
@@ -160,15 +196,28 @@ public:
   virtual void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") = 0;
 
   /**
-   * @brief Periodic processing hook (optional).
+   * @brief Periodic processing hook, called from HaDiscovery::tick().
    *
-   * This is required only for synchronous MQTT clients that do not provide
-   * a native connection callback.
-   *
-   * The host firmware should call this regularly (e.g. from loop()) if using
-   * such a transport.
+   * Detects connection changes for synchronous clients, and runs automatic reconnect.
    */
   virtual void tick() {}
+
+  /**
+   * @brief Turn automatic reconnect on or off, and set its delays.
+   *
+   * On by default. After the connection drops, tick() tries again right away, then
+   * waits @p minDelayMs, doubling after each failure up to @p maxDelayMs.
+   *
+   * @param enabled    Whether to reconnect automatically
+   * @param minDelayMs Delay after the first failed attempt (default 1 s)
+   * @param maxDelayMs Longest delay between attempts (default 60 s)
+   */
+  void setAutoReconnect(bool enabled, uint32_t minDelayMs = 1000, uint32_t maxDelayMs = 60000) {
+    reconnect.enabled = enabled;
+    reconnect.minDelayMs = minDelayMs;
+    reconnect.maxDelayMs = maxDelayMs < minDelayMs ? minDelayMs : maxDelayMs;
+    reconnect.currentDelayMs = minDelayMs;
+  }
 
   /**
    * @brief Set the logger for this transport.
@@ -181,5 +230,7 @@ public:
 
 protected:
   JBLogger* log = nullptr;
+  /** @brief Reconnect timing, used by tick() in the transports. */
+  ReconnectBackoff reconnect;
 };
 /** @} */

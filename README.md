@@ -6,7 +6,8 @@ An Arduino library for Home Assistant MQTT Auto Discovery.
 ## What is this library?
 **JBHaMqttDiscovery** makes sensors and devices connected to Arduino/ESP8266/ESP32 devices show up automatically in **Home Assistant** via **MQTT Discovery**.
 
-It helps you builds the correct *discovery topics* and *JSON configuration payloads* and publishes them as **retained** messages, so Home Assistant can create entities (e.g. sensors, switches, binary sensors, buttons) without manual UI/YAML setup.
+It builds a Home Assistant *device discovery* payload with all your entities (sensors, switches, binary sensors, buttons) and publishes it as one **retained** message, so Home Assistant creates the device and its entities without manual UI/YAML setup.
+It also handles availability, commands from Home Assistant, reconnects and Home Assistant restarts.
 
 It is also **transport-agnostic**: you can use different MQTT client libraries through a small “transport” adapter (e.g. PubSubClient or AsyncMqttClient), while keeping the same discovery API in your firmware.
 
@@ -64,13 +65,13 @@ void setup() {
 
 void loop() {
   mqtt.loop(); // REQUIRED
-  ha.tick();   // REQUIRED: detects (re)connects and Home Assistant restarts
+  ha.tick();   // REQUIRED: publishes discovery, handles commands, reconnects
 }
 ```
 
-> PubSubClient's default 256 byte buffer is too small for discovery payloads, which are usually 400–600 bytes.
-> `PubSubClientTransport` raises it to 1024 bytes in `setServer()`, and grows it further if a publish needs more.
-> Pass a different minimum as the second constructor argument, e.g. `PubSubClientTransport transport(mqtt, 2048);`.
+> PubSubClient's default 256 byte buffer is too small for the discovery payload, which is about 400 bytes plus 150–250 bytes per entity.
+> `PubSubClientTransport` raises it to 2048 bytes in `setServer()`, and grows it further if a publish needs more.
+> Pass a different minimum as the second constructor argument, e.g. `PubSubClientTransport transport(mqtt, 4096);`.
 
 ### AsyncMqttClient (event-driven, no polling required)
 ```c++
@@ -116,9 +117,19 @@ void setup() {
 }
 
 void loop() {
-  ha.tick(); // Re-publishes discovery after Home Assistant restarts
+  ha.tick(); // REQUIRED: publishes discovery, handles commands, reconnects
 }
 ```
+
+## How discovery is published
+
+The library uses Home Assistant's device discovery: one retained payload on `homeassistant/device/<node_id>/config`, with the device info (`dev`), the origin (`o`), the shared availability topic and every entity as a component (`cmps`).
+
+`publishSensorDiscovery()` and the other `publish*Discovery()` calls add or update an entity.
+The payload is published from the next `ha.tick()`, so adding several entities in `setup()` sends one message.
+States published before that are sent right after it.
+
+> `node_id` is part of the topic, so it may only contain letters, digits, `_` and `-`.
 
 ## Availability and Last Will
 
@@ -130,18 +141,23 @@ Call `setDevice()` before connecting, and connect through the transport (`transp
 
 ## Reconnects and Home Assistant restarts
 
-The library keeps every discovery config you publish, and the last state of each entity.
-It sends them again:
+After the first `transport.connect(...)`, the transport reconnects by itself from `ha.tick()` when the connection drops.
+It tries again right away, then waits 1 second, doubling after each failed attempt up to 60 seconds.
+Change the delays with `transport.setAutoReconnect(true, minMs, maxMs)`, or turn it off with `transport.setAutoReconnect(false)` if your firmware already reconnects itself.
+
+> With PubSubClient each attempt blocks `loop()` until the broker answers or the attempt times out.
+
+The library keeps your entities and the last state of each one, and sends them again:
 
 - every time the MQTT connection comes up, and
 - when Home Assistant comes back online (it publishes `online` on `homeassistant/status`), after a random delay of up to 5 seconds so many devices don't publish at once. Change it with `ha.setRepublishDelay(ms)`.
 
-Discovery configs and states published while disconnected are kept and sent when the connection comes up.
+Entities and states published while disconnected are kept and sent when the connection comes up.
 So you can publish them in `setup()` right after `connect()`, even with AsyncMqttClient, which connects in the background.
 
 Call `ha.republishAll()` to send everything again yourself.
 
-> Each entity's config is kept in RAM (about 400–600 bytes each).
+> Each entity is kept in RAM (about 150–250 bytes each).
 
 ## Commands from Home Assistant
 
@@ -166,7 +182,7 @@ void setup() {
 }
 ```
 
-> With AsyncMqttClient the handler runs in the network task, not in `loop()`. Keep it short and hand longer work over to `loop()`.
+Commands are queued when they arrive and the handler is called from `ha.tick()`, so it always runs in `loop()`, with both MQTT clients.
 
 ## Entity names and IDs
 
@@ -190,9 +206,9 @@ HaSensorConfig temp{
 
 ## Origin
 
-Every discovery config includes an origin block (`o`) with this library's name, version and URL.
+The discovery payload includes an origin block (`o`) with this library's name, version and URL.
 Home Assistant logs it when entities are discovered, which helps when tracking down where an entity came from.
-To send your firmware's details instead, call this before publishing discovery configs:
+To send your firmware's details instead, call:
 
 ```c++
 ha.setOrigin("MyFirmware", "2.1.0", "https://example.com/support");
@@ -252,3 +268,31 @@ ha.publishButtonDiscovery(restart);
 
 // Presses arrive in the onCommand() handler with the "PRESS" payload.
 ```
+
+## Removing entities
+
+```c++
+ha.removeEntity("sensor", "temperature"); // one entity
+ha.removeDevice();                        // the device and all its entities
+```
+
+`removeEntity()` publishes the device payload twice from the next `ha.tick()`: once with the entity as a removal stub (`{"p": "sensor"}`), then without it.
+That removes it on current Home Assistant versions, and on later versions that treat the payload as the device's full set of entities.
+Removing the last entity also clears the device discovery topic.
+
+`removeDevice()` publishes an empty retained payload on the device discovery topic, which removes the device and all its entities.
+
+> Deleting an MQTT entity in Home Assistant doesn't stop the device from announcing it, so it comes back. Remove it in the firmware instead.
+
+## Migrating from older versions
+
+Older versions of this library published one discovery topic per entity (`homeassistant/<component>/<node_id>/<object_id>/config`).
+To move those entities to device discovery without losing their entity IDs, names and history, turn on migration for one boot:
+
+```c++
+ha.setMigrateLegacyDiscovery(true);
+```
+
+The first device payload then follows Home Assistant's migration steps.
+It publishes `{"migrate_discovery": true}` to each entity's old topic, then the device payload, and clears the old topics 5 seconds later.
+Check the Home Assistant log for the migration messages, then remove the call again.

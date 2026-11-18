@@ -27,6 +27,15 @@ static const char* kAvailOffline = "offline";
 static const char* kOn = "ON";
 static const char* kOff = "OFF";
 static const char* kPress = "PRESS";
+static const char* kMigratePayload = "{\"migrate_discovery\":true}";
+
+static bool isDue(uint32_t now, uint32_t at) {
+  return static_cast<int32_t>(now - at) >= 0;
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
 
 HaDiscovery::HaDiscovery(MqttTransport& transport,
                          const char* discovery_prefix,
@@ -54,9 +63,26 @@ void HaDiscovery::setDevice(const HaDeviceInfo& dev) {
   _device.sw_version = copy(dev.sw_version);
   _device.identifiers = copy(dev.identifiers);
 
-  if (hasDevice()) {
-    // The broker publishes this if the device drops off without disconnecting
-    _transport.setWill(buildDefaultAvailabilityTopic().c_str(), kAvailOffline, true, 1);
+  if (!hasDevice()) {
+    return;
+  }
+
+#ifdef HAS_LOG
+  for (char c : _device.node_id) {
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+    if (!ok) {
+      _log.error("node_id '%s' may only contain letters, digits, '_' and '-'", _device.node_id.c_str());
+      break;
+    }
+  }
+#endif
+
+  // The broker publishes this if the device drops off without disconnecting
+  _transport.setWill(buildDefaultAvailabilityTopic().c_str(), kAvailOffline, true, 1);
+
+  // The device block is part of the payload
+  if (!_components.empty()) {
+    _configDirty = true;
   }
 }
 
@@ -64,6 +90,9 @@ void HaDiscovery::setOrigin(const char* name, const char* sw_version, const char
   _origin.name = name ? name : JBHAMQTTDISCOVERY_NAME;
   _origin.sw_version = sw_version ? sw_version : "";
   _origin.url = url ? url : "";
+  if (!_components.empty()) {
+    _configDirty = true;
+  }
 }
 
 void HaDiscovery::onCommand(HaCommandCallback cb) {
@@ -74,38 +103,41 @@ void HaDiscovery::setRepublishDelay(uint32_t maxDelayMs) {
   _republishDelayMaxMs = maxDelayMs;
 }
 
-bool HaDiscovery::canPublishNow() const {
-  // While a connect is pending, tick() is about to send everything anyway
-  return _transport.connected() && !_connectPending;
+void HaDiscovery::setMigrateLegacyDiscovery(bool enable, uint32_t clearDelayMs) {
+  _migration = enable ? MigrationState::Pending : MigrationState::Off;
+  _migrationClearDelayMs = clearDelayMs;
 }
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
 
 void HaDiscovery::tick() {
   _transport.tick();
+  processIncoming();
 
-  if (_connectPending) {
-    if (!_transport.connected()) {
-      return;
-    }
-    _connectPending = false;
-    _republishPending = false;
-
-    // Subscriptions don't survive a clean-session reconnect
-    _transport.subscribe(buildBirthTopic().c_str(), 1);
-    for (const CommandRoute& route : _commands) {
-      _transport.subscribe(route.topic.c_str(), 1);
-    }
-
-    // A reconnect may follow a broker restart that lost retained messages,
-    // and anything published while disconnected was only stored
-    republishAll();
+  if (!_transport.connected()) {
     return;
   }
 
-  if (_republishPending && static_cast<int32_t>(nowMs() - _republishAt) >= 0) {
+  uint32_t now = nowMs();
+  if (_connectPending) {
+    _connectPending = false;
     _republishPending = false;
-    if (_transport.connected()) {
-      republishAll();
-    }
+    // Subscriptions don't survive a clean-session reconnect
+    subscribeAll();
+    // A reconnect may follow a broker restart that lost retained messages,
+    // and anything published while disconnected was only stored
+    republishAll();
+  } else if (_configDirty) {
+    republishAll();
+  } else if (_republishPending && isDue(now, _republishAt)) {
+    _republishPending = false;
+    republishAll();
+  }
+
+  if (_migration == MigrationState::WaitingToClear && isDue(now, _migrationClearAt)) {
+    runMigrationClear();
   }
 }
 
@@ -114,13 +146,11 @@ void HaDiscovery::republishAll() {
     return;
   }
 #ifdef HAS_LOG
-  _log.info("Publishing %u discovery configs and %u states",
-            (unsigned)_entities.size(), (unsigned)_states.size());
+  _log.info("Publishing device discovery (%u entities) and %u states",
+            (unsigned)_components.size(), (unsigned)_states.size());
 #endif
-  // Configs first, so Home Assistant has the entities before their state arrives
-  for (const EntityConfig& e : _entities) {
-    publishConfigJson(e.topic.c_str(), e.json.c_str(), e.retained, e.qos);
-  }
+  // Discovery first, so Home Assistant has the entities before their state arrives
+  publishDevicePayload();
   publishAvailabilityOnline(true, 1);
   for (const StateEntry& st : _states) {
     _transport.publish(st.topic.c_str(),
@@ -131,14 +161,15 @@ void HaDiscovery::republishAll() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Transport callbacks (may run in the network task)
+// ---------------------------------------------------------------------------
+
 void HaDiscovery::onTransportConnectThunk(void* ctx) {
   static_cast<HaDiscovery*>(ctx)->onTransportConnect();
 }
 
 void HaDiscovery::onTransportConnect() {
-#ifdef HAS_LOG
-  _log.info("MQTT Transport connected");
-#endif
   // With AsyncMqttClient this runs in the network task, so only set a flag.
   // tick() subscribes and publishes from loop().
   _connectPending = true;
@@ -152,11 +183,30 @@ void HaDiscovery::onTransportMessage(const char* topic, const uint8_t* payload, 
   if (!topic) {
     return;
   }
+  // Only queue here; tick() handles it in loop()
+  _incomingLock.lock();
+  if (_incoming.size() < MAX_INCOMING) {
+    _incoming.push_back({topic, payload ? std::string(reinterpret_cast<const char*>(payload), len) : std::string()});
+  }
+  _incomingLock.unlock();
+}
 
-  if (buildBirthTopic() == topic) {
+void HaDiscovery::processIncoming() {
+  std::vector<IncomingMessage> messages;
+  _incomingLock.lock();
+  messages.swap(_incoming);
+  _incomingLock.unlock();
+
+  for (const IncomingMessage& msg : messages) {
+    handleMessage(msg);
+  }
+}
+
+void HaDiscovery::handleMessage(const IncomingMessage& msg) {
+  if (msg.topic == buildBirthTopic()) {
     // Home Assistant (re)started and has forgotten non-retained state.
     // Wait a random time so many devices don't all publish at once.
-    if (payload && len == strlen(kAvailOnline) && memcmp(payload, kAvailOnline, len) == 0) {
+    if (msg.payload == kAvailOnline) {
       uint32_t delay = randomMs(_republishDelayMaxMs);
 #ifdef HAS_LOG
       _log.info("Home Assistant is online, publishing discovery in %u ms", (unsigned)delay);
@@ -168,13 +218,12 @@ void HaDiscovery::onTransportMessage(const char* topic, const uint8_t* payload, 
   }
 
   for (const CommandRoute& route : _commands) {
-    if (route.topic == topic) {
-      std::string p = payload ? std::string(reinterpret_cast<const char*>(payload), len) : std::string();
+    if (route.topic == msg.topic) {
 #ifdef HAS_LOG
-      _log.debug("Command for %s: %s", route.object_id.c_str(), p.c_str());
+      _log.debug("Command for %s: %s", route.object_id.c_str(), msg.payload.c_str());
 #endif
       if (_onCommand) {
-        _onCommand(route.object_id.c_str(), p.c_str());
+        _onCommand(route.object_id.c_str(), msg.payload.c_str());
       }
 #ifdef HAS_LOG
       else {
@@ -186,21 +235,33 @@ void HaDiscovery::onTransportMessage(const char* topic, const uint8_t* payload, 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+void HaDiscovery::subscribeAll() {
+  _transport.subscribe(buildBirthTopic().c_str(), 1);
+  for (const CommandRoute& route : _commands) {
+    _transport.subscribe(route.topic.c_str(), 1);
+  }
+}
+
 void HaDiscovery::registerCommandTopic(const std::string& topic, const char* object_id) {
+  bool subscribeNow = _transport.connected() && !_connectPending;
   for (CommandRoute& route : _commands) {
     if (route.object_id == object_id) {
       if (route.topic == topic) {
         return;
       }
       route.topic = topic;
-      if (canPublishNow()) {
+      if (subscribeNow) {
         _transport.subscribe(topic.c_str(), 1);
       }
       return;
     }
   }
   _commands.push_back({topic, object_id});
-  if (canPublishNow()) {
+  if (subscribeNow) {
     _transport.subscribe(topic.c_str(), 1);
   }
 }
@@ -214,6 +275,10 @@ void HaDiscovery::unregisterCommandTopics(const char* object_id) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Availability and state
+// ---------------------------------------------------------------------------
 
 void HaDiscovery::publishAvailabilityOnline(bool retained, uint8_t qos) {
   if (!hasDevice()) {
@@ -237,107 +302,9 @@ void HaDiscovery::publishAvailabilityOffline(bool retained, uint8_t qos) {
   _transport.publish(topic.c_str(), reinterpret_cast<const uint8_t*>(kAvailOffline), strlen(kAvailOffline), retained, qos);
 }
 
-bool HaDiscovery::publishSensorDiscovery(const HaSensorConfig& cfg, bool retained, uint8_t qos) {
-  if (!hasDevice() || !cfg.common.object_id) {
-    return false;
-  }
-
-  std::string json = buildSensorConfigJson(cfg);
-  if (json.empty()) {
-#ifdef HAS_LOG
-    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
-#endif
-    return false;
-  }
-
-  return storeAndPublishConfig("sensor", cfg.common.object_id, json.c_str(), retained, qos);
-}
-
-bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retained, uint8_t qos) {
-  if (!hasDevice() || !cfg.common.object_id) {
-    return false;
-  }
-
-  std::string json = buildSwitchConfigJson(cfg);
-  if (json.empty()) {
-#ifdef HAS_LOG
-    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
-#endif
-    return false;
-  }
-
-  registerCommandTopic(cfg.command_topic_override
-                         ? std::string(cfg.command_topic_override)
-                         : buildDefaultCommandTopic(cfg.common.object_id),
-                       cfg.common.object_id);
-  return storeAndPublishConfig("switch", cfg.common.object_id, json.c_str(), retained, qos);
-}
-
-bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained, uint8_t qos) {
-  if (!hasDevice() || !cfg.common.object_id) {
-    return false;
-  }
-
-  std::string json = buildBinarySensorConfigJson(cfg);
-  if (json.empty()) {
-#ifdef HAS_LOG
-    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
-#endif
-    return false;
-  }
-
-  return storeAndPublishConfig("binary_sensor", cfg.common.object_id, json.c_str(), retained, qos);
-}
-
-bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retained, uint8_t qos) {
-  if (!hasDevice() || !cfg.common.object_id) {
-    return false;
-  }
-
-  std::string json = buildButtonConfigJson(cfg);
-  if (json.empty()) {
-#ifdef HAS_LOG
-    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
-#endif
-    return false;
-  }
-
-  registerCommandTopic(cfg.command_topic_override
-                         ? std::string(cfg.command_topic_override)
-                         : buildDefaultCommandTopic(cfg.common.object_id),
-                       cfg.common.object_id);
-  return storeAndPublishConfig("button", cfg.common.object_id, json.c_str(), retained, qos);
-}
-
-bool HaDiscovery::removeEntity(const char* component, const char* object_id, uint8_t qos) {
-  if (!hasDevice() || !component || !object_id) {
-    return false;
-  }
-
-  std::string topic = buildConfigTopic(component, object_id);
-
-  if (strcmp(component, "switch") == 0 || strcmp(component, "button") == 0) {
-    unregisterCommandTopics(object_id);
-  }
-
-  for (auto it = _entities.begin(); it != _entities.end();) {
-    if (it->component == component && it->object_id == object_id) {
-      it = _entities.erase(it);
-    } else {
-      ++it;
-    }
-  }
-  std::string stateTopic = buildDefaultStateTopic(object_id);
-  for (auto it = _states.begin(); it != _states.end();) {
-    if (it->topic == stateTopic) {
-      it = _states.erase(it);
-    } else {
-      ++it;
-    }
-  }
-
-  // Empty retained config payload removes entity in Home Assistant
-  return _transport.publish(topic.c_str(), nullptr, 0, true, qos);
+bool HaDiscovery::canPublishStateNow() const {
+  // While a connect or a device payload is pending, tick() sends the states right after it
+  return _transport.connected() && !_connectPending && !_configDirty;
 }
 
 bool HaDiscovery::publishState(const char* object_id, const char* payload, bool retained, uint8_t qos) {
@@ -362,9 +329,9 @@ bool HaDiscovery::publishState(const char* object_id, const char* payload, bool 
     _states.push_back({topic, payload, retained, qos});
   }
 
-  if (!canPublishNow()) {
+  if (!canPublishStateNow()) {
 #ifdef HAS_LOG
-    _log.debug("Not connected yet, state for %s will be sent on connect", object_id);
+    _log.debug("State for %s will be sent after the device payload", object_id);
 #endif
     return true;
   }
@@ -373,10 +340,10 @@ bool HaDiscovery::publishState(const char* object_id, const char* payload, bool 
   _log.debug("Publishing state to %s: %s", topic.c_str(), payload);
 #endif
   bool ok = _transport.publish(topic.c_str(),
-                      reinterpret_cast<const uint8_t*>(payload),
-                      strlen(payload),
-                      retained,
-                      qos);
+                               reinterpret_cast<const uint8_t*>(payload),
+                               strlen(payload),
+                               retained,
+                               qos);
 #ifdef HAS_LOG
   if (!ok) {
     _log.error("Failed to publish state to %s", topic.c_str());
@@ -389,8 +356,301 @@ bool HaDiscovery::publishStateSwitch(const char* object_id, bool on, bool retain
   return publishState(object_id, on ? kOn : kOff, retained, qos);
 }
 
-std::string HaDiscovery::buildConfigTopic(const char* component, const char* object_id) const {
-  // homeassistant/<component>/<node_id>/<object_id>/config
+// ---------------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------------
+
+bool HaDiscovery::publishSensorDiscovery(const HaSensorConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  std::string json = buildSensorConfigJson(cfg);
+  if (json.empty()) {
+#ifdef HAS_LOG
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
+#endif
+    return false;
+  }
+  return addComponent("sensor", cfg.common.object_id, std::move(json));
+}
+
+bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  std::string json = buildSwitchConfigJson(cfg);
+  if (json.empty()) {
+#ifdef HAS_LOG
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
+#endif
+    return false;
+  }
+  registerCommandTopic(cfg.command_topic_override
+                         ? std::string(cfg.command_topic_override)
+                         : buildDefaultCommandTopic(cfg.common.object_id),
+                       cfg.common.object_id);
+  return addComponent("switch", cfg.common.object_id, std::move(json));
+}
+
+bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  std::string json = buildBinarySensorConfigJson(cfg);
+  if (json.empty()) {
+#ifdef HAS_LOG
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
+#endif
+    return false;
+  }
+  return addComponent("binary_sensor", cfg.common.object_id, std::move(json));
+}
+
+bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  std::string json = buildButtonConfigJson(cfg);
+  if (json.empty()) {
+#ifdef HAS_LOG
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
+#endif
+    return false;
+  }
+  registerCommandTopic(cfg.command_topic_override
+                         ? std::string(cfg.command_topic_override)
+                         : buildDefaultCommandTopic(cfg.common.object_id),
+                       cfg.common.object_id);
+  return addComponent("button", cfg.common.object_id, std::move(json));
+}
+
+bool HaDiscovery::addComponent(const char* component, const char* object_id, std::string json) {
+  // Added again before the removal went out: no removal needed
+  for (auto it = _removed.begin(); it != _removed.end();) {
+    if (it->object_id == object_id) {
+      it = _removed.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  _clearDeviceTopic = false;
+
+  for (Component& c : _components) {
+    if (c.object_id == object_id) {
+      if (c.component == component && c.json == json) {
+        return true;  // unchanged, nothing to publish
+      }
+#ifdef HAS_LOG
+      if (c.component != component) {
+        _log.warning("object_id %s changes from %s to %s; object_ids must be unique per device",
+                     object_id, c.component.c_str(), component);
+      }
+#endif
+      c.component = component;
+      c.json = std::move(json);
+      _configDirty = true;
+      return true;
+    }
+  }
+
+  _components.push_back({component, object_id, std::move(json)});
+  _configDirty = true;
+  return true;
+}
+
+bool HaDiscovery::removeEntity(const char* component, const char* object_id) {
+  if (!component || !object_id) {
+    return false;
+  }
+
+  bool found = false;
+  for (auto it = _components.begin(); it != _components.end(); ++it) {
+    if (it->component == component && it->object_id == object_id) {
+      _components.erase(it);
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    return false;
+  }
+
+  _removed.push_back({component, object_id, std::string()});
+  if (_components.empty()) {
+    _clearDeviceTopic = true;
+  }
+  _configDirty = true;
+
+  if (strcmp(component, "switch") == 0 || strcmp(component, "button") == 0) {
+    unregisterCommandTopics(object_id);
+  }
+
+  std::string stateTopic = buildDefaultStateTopic(object_id);
+  for (auto it = _states.begin(); it != _states.end(); ++it) {
+    if (it->topic == stateTopic) {
+      _states.erase(it);
+      break;
+    }
+  }
+  return true;
+}
+
+bool HaDiscovery::removeDevice() {
+  _components.clear();
+  _removed.clear();
+  _commands.clear();
+  _states.clear();
+
+  if (!hasDevice()) {
+    return false;
+  }
+  if (!_transport.connected() || _connectPending) {
+    // Clear the device topic once connected
+    _clearDeviceTopic = true;
+    _configDirty = true;
+    return true;
+  }
+  _clearDeviceTopic = false;
+  _configDirty = false;
+#ifdef HAS_LOG
+  _log.info("Removing device %s", _device.node_id.c_str());
+#endif
+  return publishRetained(buildDeviceTopic(), std::string(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Device payload
+// ---------------------------------------------------------------------------
+
+void HaDiscovery::publishDevicePayload() {
+  _configDirty = false;
+  if (!hasDevice()) {
+    return;
+  }
+
+  if (_migration == MigrationState::Pending && !_components.empty()) {
+    runMigrationStart();
+  }
+
+  std::string topic = buildDeviceTopic();
+
+  if (!_removed.empty()) {
+    // Removal stubs ({"p": ...}) remove components on current Home Assistant versions.
+    // The payload without them below removes them on versions that treat the
+    // payload as the full desired state.
+    publishRetained(topic, buildDevicePayload(true), 1);
+    _removed.clear();
+  }
+
+  if (_components.empty()) {
+    if (_clearDeviceTopic) {
+      _clearDeviceTopic = false;
+#ifdef HAS_LOG
+      _log.info("No entities left, clearing %s", topic.c_str());
+#endif
+      publishRetained(topic, std::string(), 1);
+    }
+    // Nothing to announce yet. Don't clear the topic here, entities may be added later.
+    return;
+  }
+
+  std::string payload = buildDevicePayload(false);
+  if (payload.empty()) {
+#ifdef HAS_LOG
+    _log.error("Could not build the device payload (out of memory?)");
+#endif
+    return;
+  }
+#ifdef HAS_LOG
+  _log.debug("Publishing device discovery to %s (%u bytes)", topic.c_str(), (unsigned)payload.size());
+#endif
+  publishRetained(topic, payload, 1);
+}
+
+std::string HaDiscovery::buildDevicePayload(bool withRemovalStubs) const {
+  JsonDocument doc;
+  addDeviceObject(doc);
+
+  JsonObject o = doc["o"].to<JsonObject>();
+  o["name"] = _origin.name;
+  if (!_origin.sw_version.empty()) {
+    o["sw"] = _origin.sw_version;
+  }
+  if (!_origin.url.empty()) {
+    o["url"] = _origin.url;
+  }
+
+  // Shared by all components, unless a component sets its own
+  doc["avty_t"] = buildDefaultAvailabilityTopic();
+  doc["pl_avail"] = kAvailOnline;
+  doc["pl_not_avail"] = kAvailOffline;
+
+  JsonObject cmps = doc["cmps"].to<JsonObject>();
+  for (const Component& c : _components) {
+    cmps[c.object_id] = serialized(c.json.c_str(), c.json.size());
+  }
+  if (withRemovalStubs) {
+    for (const Component& r : _removed) {
+      cmps[r.object_id]["p"] = r.component;
+    }
+  }
+  return serializeDoc(doc);
+}
+
+bool HaDiscovery::publishRetained(const std::string& topic, const std::string& payload, uint8_t qos) {
+  bool ok = _transport.publish(topic.c_str(),
+                               payload.empty() ? nullptr : reinterpret_cast<const uint8_t*>(payload.data()),
+                               payload.size(),
+                               true,
+                               qos);
+#ifdef HAS_LOG
+  if (!ok) {
+    _log.error("Failed to publish to %s", topic.c_str());
+  }
+#endif
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Migration from per-entity discovery topics
+// ---------------------------------------------------------------------------
+
+void HaDiscovery::runMigrationStart() {
+#ifdef HAS_LOG
+  _log.info("Migrating %u entities from per-entity discovery topics", (unsigned)_components.size());
+#endif
+  _legacyTopics.clear();
+  for (const Component& c : _components) {
+    std::string topic = buildLegacyConfigTopic(c.component, c.object_id);
+    publishRetained(topic, kMigratePayload, 1);
+    _legacyTopics.push_back(topic);
+  }
+  _migration = MigrationState::WaitingToClear;
+  _migrationClearAt = nowMs() + _migrationClearDelayMs;
+}
+
+void HaDiscovery::runMigrationClear() {
+#ifdef HAS_LOG
+  _log.info("Clearing %u old per-entity discovery topics", (unsigned)_legacyTopics.size());
+#endif
+  for (const std::string& topic : _legacyTopics) {
+    publishRetained(topic, std::string(), 1);
+  }
+  _legacyTopics.clear();
+  _migration = MigrationState::Done;
+}
+
+// ---------------------------------------------------------------------------
+// Topics
+// ---------------------------------------------------------------------------
+
+std::string HaDiscovery::buildDeviceTopic() const {
+  // homeassistant/device/<node_id>/config
+  return _discoveryPrefix + "/device/" + _device.node_id + "/config";
+}
+
+std::string HaDiscovery::buildLegacyConfigTopic(const std::string& component, const std::string& object_id) const {
+  // homeassistant/<component>/<node_id>/<object_id>/config, used by older versions
   return _discoveryPrefix + "/" + component + "/" + _device.node_id + "/" + object_id + "/config";
 }
 
@@ -404,43 +664,19 @@ std::string HaDiscovery::buildDefaultCommandTopic(const char* object_id) const {
   return _baseTopicPrefix + "/" + _device.node_id + "/" + object_id + "/set";
 }
 
+std::string HaDiscovery::buildDefaultAvailabilityTopic() const {
+  // <base>/<node_id>/status
+  return _baseTopicPrefix + "/" + _device.node_id + "/status";
+}
+
 std::string HaDiscovery::buildBirthTopic() const {
   // Home Assistant publishes "online"/"offline" here
   return _discoveryPrefix + "/status";
 }
 
-bool HaDiscovery::storeAndPublishConfig(const char* component, const char* object_id,
-                                        const char* json, bool retained, uint8_t qos) {
-  std::string topic = buildConfigTopic(component, object_id);
-
-  bool stored = false;
-  for (EntityConfig& e : _entities) {
-    if (e.component == component && e.object_id == object_id) {
-      e.topic = topic;
-      e.json = json;
-      e.retained = retained;
-      e.qos = qos;
-      stored = true;
-      break;
-    }
-  }
-  if (!stored) {
-    _entities.push_back({component, object_id, topic, json, retained, qos});
-  }
-
-  if (!canPublishNow()) {
-#ifdef HAS_LOG
-    _log.debug("Not connected yet, %s/%s will be published on connect", component, object_id);
-#endif
-    return true;
-  }
-  return publishConfigJson(topic.c_str(), json, retained, qos);
-}
-
-std::string HaDiscovery::buildDefaultAvailabilityTopic() const {
-  // <base>/<node_id>/status
-  return _baseTopicPrefix + "/" + _device.node_id + "/status";
-}
+// ---------------------------------------------------------------------------
+// Component configs
+// ---------------------------------------------------------------------------
 
 void HaDiscovery::addDeviceObject(JsonDocument& doc) const {
   JsonObject dev = doc["dev"].to<JsonObject>();
@@ -460,24 +696,30 @@ void HaDiscovery::addDeviceObject(JsonDocument& doc) const {
   }
 }
 
-bool HaDiscovery::publishConfigJson(const char* topic, const char* json, bool retained, uint8_t qos) {
-#ifdef HAS_LOG
-  _log.debug("Publishing discovery config to %s", topic);
-#endif
-  bool ok = _transport.publish(topic,
-                      reinterpret_cast<const uint8_t*>(json),
-                      strlen(json),
-                      retained,
-                      qos);
-#ifdef HAS_LOG
-  if (!ok) {
-    _log.error("Failed to publish discovery config to %s", topic);
+std::string HaDiscovery::sanitizeEntityId(const char* entity_id) const {
+  std::string out(entity_id);
+  bool changed = false;
+  for (char& c : out) {
+    if (c >= 'A' && c <= 'Z') {
+      c = static_cast<char>(c - 'A' + 'a');
+      changed = true;
+    } else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) {
+      c = '_';
+      changed = true;
+    }
   }
+#ifdef HAS_LOG
+  if (changed) {
+    _log.warning("entity_id '%s' changed to '%s'", entity_id, out.c_str());
+  }
+#else
+  (void)changed;
 #endif
-  return ok;
+  return out;
 }
 
 void HaDiscovery::addCommonFields(JsonDocument& doc, const char* component, const HaEntityCommon& common) const {
+  doc["p"] = component;
   if (common.use_device_name) {
     // null name: the entity is the device's main feature and takes the device name
     doc["name"] = nullptr;
@@ -485,29 +727,19 @@ void HaDiscovery::addCommonFields(JsonDocument& doc, const char* component, cons
     doc["name"] = common.name ? common.name : common.object_id;
   }
   doc["uniq_id"] = _device.node_id + "_" + common.object_id;
-  if (common.entity_id) {
-    doc["def_ent_id"] = std::string(component) + "." + common.entity_id;
+  if (common.entity_id && *common.entity_id) {
+    doc["def_ent_id"] = std::string(component) + "." + sanitizeEntityId(common.entity_id);
   }
 
-  doc["avty_t"] = common.availability_topic_override
-    ? std::string(common.availability_topic_override)
-    : buildDefaultAvailabilityTopic();
-  doc["pl_avail"] = kAvailOnline;
-  doc["pl_not_avail"] = kAvailOffline;
+  // The default availability is shared at the root of the device payload
+  if (common.availability_topic_override) {
+    doc["avty_t"] = common.availability_topic_override;
+    doc["pl_avail"] = kAvailOnline;
+    doc["pl_not_avail"] = kAvailOffline;
+  }
 
   if (common.icon) {
     doc["ic"] = common.icon;
-  }
-
-  addDeviceObject(doc);
-
-  JsonObject o = doc["o"].to<JsonObject>();
-  o["name"] = _origin.name;
-  if (!_origin.sw_version.empty()) {
-    o["sw"] = _origin.sw_version;
-  }
-  if (!_origin.url.empty()) {
-    o["url"] = _origin.url;
   }
 }
 
@@ -576,19 +808,4 @@ std::string HaDiscovery::buildBinarySensorConfigJson(const HaBinarySensorConfig&
     doc["dev_cla"] = cfg.device_class;
   }
   return serializeDoc(doc);
-}
-
-bool HaDiscovery::pressButton(const char* object_id, const char* payload, bool retained, uint8_t qos) {
-  if (!hasDevice() || !object_id) {
-    return false;
-  }
-
-  std::string cmdTopic = buildDefaultCommandTopic(object_id);
-
-  const char* p = payload ? payload : kPress;
-  return _transport.publish(cmdTopic.c_str(),
-                   reinterpret_cast<const uint8_t*>(p),
-                   strlen(p),
-                   retained,
-                   qos);
 }

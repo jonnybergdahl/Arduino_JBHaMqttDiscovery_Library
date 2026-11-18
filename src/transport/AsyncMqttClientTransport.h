@@ -27,6 +27,10 @@
  *
  * Incoming messages split over several TCP packets are ignored. Discovery
  * command payloads are short, so this doesn't happen in practice.
+ *
+ * After the first connect(), tick() reconnects when the connection drops (see
+ * setAutoReconnect()). Turn this off if your firmware already reconnects with its
+ * own timer, as many AsyncMqttClient sketches do.
  */
 class AsyncMqttClientTransport : public MqttTransport {
 public:
@@ -75,16 +79,43 @@ public:
    * @inheritdoc
    *
    * Starts the connection and returns right away. The onConnect callback
-   * fires when the connection is established.
+   * fires when the connection is established. If it fails, tick() keeps trying
+   * (see setAutoReconnect()).
    */
   bool connect(const char* clientId = nullptr) override {
-    if (clientId && *clientId) {
+    if (clientId && *clientId && clientId != clientIdStr.c_str()) {
       clientIdStr = clientId;
       client.setClientId(clientIdStr.c_str());
     }
-    if (log) log->info("Async connecting");
-    client.connect();
+    started = true;
+    startAttempt();
     return true;
+  }
+
+  /**
+   * @brief Run automatic reconnect. Called from HaDiscovery::tick().
+   */
+  void tick() override {
+    if (!started) {
+      return;
+    }
+    uint32_t now = millis();
+
+    if (disconnectEvent) {
+      disconnectEvent = false;
+      if (droppedSession) {
+        if (log) log->warning("Async connection lost");
+        reconnect.reset(now);   // try again right away
+      } else {
+        if (log) log->error("Async connect FAILED");
+        reconnect.failed(now);  // wait before the next attempt
+      }
+    }
+
+    if (!isConnected && !connecting && reconnect.due(now)) {
+      if (log) log->info("Async reconnecting");
+      startAttempt();
+    }
   }
 
   /**
@@ -181,19 +212,30 @@ public:
     cb = cb_;
     ctx = ctx_;
 
+    // These run in the network task; tick() acts on the flags from loop()
     client.onConnect([this](bool /*sessionPresent*/) {
       isConnected = true;
+      connecting = false;
       if (cb) {
         cb(ctx);
       }
     });
 
     client.onDisconnect([this](AsyncMqttClientDisconnectReason /*reason*/) {
+      droppedSession = isConnected;
       isConnected = false;
+      connecting = false;
+      disconnectEvent = true;
     });
   }
 
 private:
+  void startAttempt() {
+    if (log) log->info("Async connecting");
+    connecting = true;
+    client.connect();
+  }
+
   AsyncMqttClient& client;
   std::string hostStr;
   std::string userStr;
@@ -202,6 +244,10 @@ private:
   std::string willTopicStr;
   std::string willPayloadStr;
   volatile bool isConnected = false;
+  volatile bool connecting = false;
+  volatile bool disconnectEvent = false;
+  volatile bool droppedSession = false;
+  bool started = false;
   void (*cb)(void*) = nullptr;
   /** @brief Pointer to user context for callback. */
   void* ctx = nullptr;

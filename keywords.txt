@@ -6,6 +6,7 @@ HaSwitchConfig	KEYWORD1
 HaBinarySensorConfig	KEYWORD1
 HaButtonConfig	KEYWORD1
 MqttTransport	KEYWORD1
+ReconnectBackoff	KEYWORD1
 PubSubClientTransport	KEYWORD1
 AsyncMqttClientTransport	KEYWORD1
 HaCommandCallback	KEYWORD1
@@ -30,6 +31,8 @@ publishSwitchDiscovery	KEYWORD2
 publishBinarySensorDiscovery	KEYWORD2
 publishButtonDiscovery	KEYWORD2
 removeEntity	KEYWORD2
+removeDevice	KEYWORD2
+setMigrateLegacyDiscovery	KEYWORD2
+setAutoReconnect	KEYWORD2
 publishState	KEYWORD2
 publishStateSwitch	KEYWORD2
-pressButton	KEYWORD2

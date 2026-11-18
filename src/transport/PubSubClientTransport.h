@@ -21,12 +21,14 @@
  *   setServer(), and grows it further if a publish needs more.
  * - QoS handling is best-effort (publish is always QoS 0, subscribe supports 0 and 1).
  * - Connection events are detected via rising-edge logic in tick().
+ * - Reconnect attempts in tick() block loop() until the broker answers or the
+ *   attempt times out (PubSubClient's socket timeout, 15 s by default).
  * - The transport takes over PubSubClient's message callback.
  */
 class PubSubClientTransport : public MqttTransport {
 public:
   /** @brief Default minimum PubSubClient buffer size in bytes. */
-  static constexpr uint16_t DEFAULT_BUFFER_SIZE = 1024;
+  static constexpr uint16_t DEFAULT_BUFFER_SIZE = 2048;
 
   /** @brief Bytes PubSubClient needs besides topic and payload (header + topic length). */
   static constexpr size_t PACKET_OVERHEAD = 7;
@@ -79,12 +81,16 @@ public:
    * @inheritdoc
    *
    * Blocks until the broker answers or the connection fails. On success the
-   * onConnect callback is called before this returns.
+   * onConnect callback is called before this returns. If it fails, tick() keeps
+   * trying (see setAutoReconnect()).
    */
   bool connect(const char* clientId = nullptr) override {
     if (!clientId || !*clientId) {
       if (log) log->error("PubSub connect needs a client id");
       return false;
+    }
+    if (clientId != clientIdStr.c_str()) {
+      clientIdStr = clientId;
     }
 
     const char* user = userStr.empty() ? nullptr : userStr.c_str();
@@ -96,10 +102,12 @@ public:
     bool ok = client.connect(clientId, user, pass, willTopic, willQos, willRetain, willMessage);
     if (!ok) {
       if (log) log->error("PubSub connect FAILED, state=%d", client.state());
+      reconnect.failed(millis());
       return false;
     }
 
     // Report the connection now, so the next tick() doesn't have to detect it
+    reconnect.reset(millis());
     wasConnected = true;
     if (cb) {
       cb(ctx);
@@ -128,7 +136,7 @@ public:
 
     size_t needed = PACKET_OVERHEAD + strlen(topic) + len;
     if (needed > client.getBufferSize()) {
-      if (log) log->warning("PubSub buffer too small (%u < %u), growing it", (unsigned)client.getBufferSize(), (unsigned)needed);
+      if (log) log->info("PubSub buffer too small (%u < %u), growing it", (unsigned)client.getBufferSize(), (unsigned)needed);
       if (!ensureBufferSize(needed)) {
         if (log) log->error("PubSub publish FAILED topic=%s, could not grow buffer to %u bytes", topic, (unsigned)needed);
         return false;
@@ -204,25 +212,33 @@ public:
   }
 
   /**
-   * @brief Detect MQTT connection transitions.
+   * @brief Detect MQTT connection transitions and reconnect.
    *
-   * This method must be called periodically by the host firmware.
-   *
-   * It detects a rising-edge transition (disconnected -> connected) and
-   * invokes the registered onConnect callback if present.
+   * Called from HaDiscovery::tick(). It invokes the onConnect callback on a
+   * disconnected -> connected transition. After the first connect(), it also
+   * reconnects when the connection is down (see setAutoReconnect()).
    *
    * @note This does NOT replace PubSubClient::loop().
    */
   void tick() override {
     bool nowConnected = client.connected();
+    uint32_t now = millis();
 
     if (nowConnected && !wasConnected) {
+      reconnect.reset(now);
       if (cb) {
         cb(ctx);
       }
+    } else if (!nowConnected && wasConnected) {
+      if (log) log->warning("PubSub connection lost, state=%d", client.state());
+      reconnect.reset(now);
     }
-
     wasConnected = nowConnected;
+
+    if (!nowConnected && !clientIdStr.empty() && reconnect.due(now)) {
+      if (log) log->info("PubSub reconnecting");
+      connect(clientIdStr.c_str());
+    }
   }
 
 private:
@@ -263,6 +279,7 @@ private:
 
   PubSubClient& client;
   uint16_t minBufferSize;
+  std::string clientIdStr;
   std::string hostStr;
   std::string userStr;
   std::string passStr;

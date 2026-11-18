@@ -2,6 +2,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <functional>
+#if defined(ESP32) || !defined(ARDUINO)
+#include <mutex>
+#endif
 #include <string>
 #include <vector>
 #include <ArduinoJson.h>
@@ -18,17 +21,19 @@
  * @defgroup hadiscovery Home Assistant MQTT Discovery
  * @brief Publish Home Assistant MQTT Discovery config payloads via an abstract MQTT transport.
  *
- * This module generates Home Assistant MQTT Discovery topics and JSON payloads and publishes them
+ * This module builds a Home Assistant MQTT device discovery payload and publishes it
  * using a transport adapter (e.g. PubSubClient or AsyncMqttClient).
  *
  * Key behaviors:
- * - Publishes retained Discovery config messages
+ * - Publishes one retained device discovery payload with all entities as components,
+ *   to `<discovery_prefix>/device/<node_id>/config`
  * - Publishes availability ("online"/"offline") and sets "offline" as the MQTT Last Will
  * - Subscribes to switch and button command topics and passes commands to a handler
- * - Remembers published configs and states, and sends them again on every connect
+ * - Remembers the entities and last states, and sends them again on every connect
  *   and when Home Assistant comes back online (birth message on `<discovery_prefix>/status`)
  * - Provides default topic conventions with per-entity overrides
- * - Supports removal of entities by publishing an empty retained config payload
+ * - Removes single entities or the whole device
+ * - Can migrate entities published with the older per-entity discovery topics
  *
  * @{
  */
@@ -37,7 +42,11 @@
  * @brief Home Assistant device information for the "dev" block in MQTT Discovery payloads.
  */
 struct HaDeviceInfo {
-  /** @brief Stable node identifier used in topics and unique_id (e.g. "esp32_kitchen_01"). */
+  /**
+   * @brief Stable node identifier used in topics and unique_id (e.g. "esp32_kitchen_01").
+   *
+   * Only letters, digits, `_` and `-` are allowed, since it's part of the discovery topic.
+   */
   const char* node_id = nullptr;
 
   /** @brief Device name shown in Home Assistant device registry. */
@@ -92,6 +101,8 @@ struct HaEntityCommon {
    *
    * If nullptr, the default is used:
    * `<baseTopicPrefix>/<node_id>/status`.
+   *
+   * @note The MQTT Last Will only covers the default availability topic.
    */
   const char* availability_topic_override = nullptr;
 
@@ -99,7 +110,8 @@ struct HaEntityCommon {
    * @brief Optional entity ID Home Assistant should use, without the domain.
    *
    * Sent as `def_ent_id` with the domain added, so "office_temperature" on a sensor
-   * becomes `sensor.office_temperature`. Use lowercase letters, digits and underscores.
+   * becomes `sensor.office_temperature`. Use lowercase letters, digits and underscores;
+   * uppercase letters are lowercased and other characters replaced with `_`.
    * Home Assistant only uses it when it first creates the entity. If nullptr, Home
    * Assistant makes one up from the device and entity names.
    */
@@ -199,22 +211,23 @@ struct HaButtonConfig {
 using HaCommandCallback = std::function<void(const char* object_id, const char* payload)>;
 
 /**
- * @brief Home Assistant MQTT Discovery publisher (transport-agnostic).
+ * @brief Home Assistant MQTT device discovery publisher (transport-agnostic).
  *
  * Typical usage:
  * - Construct with a MqttTransport implementation
  * - Provide device info via setDevice(), before connecting (this sets the Last Will)
  * - Register a command handler with onCommand() if you have switches or buttons
  * - Connect through the transport
- * - Publish discovery configs (retained)
- * - Publish states as needed
+ * - Add entities with the publish*Discovery() methods
+ * - Call tick() from loop(), and publish states as needed
  *
- * Call tick() from loop() with every transport. Sync transports need it to detect
- * connection changes, and it sends the configs again after Home Assistant restarts.
+ * The publish*Discovery() methods add or update an entity. The device payload with all
+ * entities is published from the next tick(), so adding several entities in setup()
+ * sends one message. States published before that are sent right after it.
  *
- * Discovery configs and states published while disconnected are stored and sent
- * when the connection comes up. Each entity's config JSON (about 300–500 bytes)
- * is kept in RAM for this.
+ * Everything is kept in RAM so it can be sent again after a reconnect or a Home
+ * Assistant restart: about 150–250 bytes per entity. The device payload (about 400
+ * bytes plus that per entity) is built from it only while it's being published.
  */
 class HaDiscovery {
 public:
@@ -239,15 +252,13 @@ public:
   void setLogLevel(LogLevel level);
 
   /**
-   * @brief Set the device information used in `dev` object of Discovery payloads.
+   * @brief Set the device information used in the `dev` object of the discovery payload.
    *
-   * This must be called before publishing discovery configs if you want correct device registry behavior.
-   *
-   * The strings are copied, so the pointers in @p dev only need to be valid during this call.
+   * Call this before adding entities. The strings are copied, so the pointers in
+   * @p dev only need to be valid during this call.
    *
    * This also sets the MQTT Last Will to "offline" on the default availability topic,
-   * so call it before connecting. Entities with an availability_topic_override are
-   * not covered by the will.
+   * so call it before connecting.
    *
    * @param dev Device info struct
    */
@@ -257,23 +268,22 @@ public:
    * @brief Set the handler for commands from Home Assistant.
    *
    * It's called when a message arrives on the command topic of a switch or button
-   * published with publishSwitchDiscovery() or publishButtonDiscovery().
+   * added with publishSwitchDiscovery() or publishButtonDiscovery().
    * For a switch, publish the new state with publishStateSwitch() after acting on it.
    *
-   * @note With AsyncMqttClient the handler runs in the network task, not in loop().
-   *       Keep it short, and hand longer work over to loop().
+   * Commands are queued when they arrive and the handler is called from tick(), so it
+   * always runs in loop(), also with AsyncMqttClient.
    *
    * @param cb Command handler
    */
   void onCommand(HaCommandCallback cb);
 
   /**
-   * @brief Set the origin (`o`) sent in every discovery config.
+   * @brief Set the origin (`o`) sent in the discovery payload.
    *
    * Home Assistant logs it when entities are discovered, and shows it in the
    * MQTT device info. It defaults to this library's name, version and URL.
    * Set it to your firmware's name, version and URL instead if you like.
-   * Call this before publishing discovery configs.
    *
    * @param name       Name of the software publishing discovery (required)
    * @param sw_version Software version (optional)
@@ -282,14 +292,31 @@ public:
   void setOrigin(const char* name, const char* sw_version = nullptr, const char* url = nullptr);
 
   /**
+   * @brief Migrate entities published by older versions of this library.
+   *
+   * Older versions published one discovery topic per entity
+   * (`<discovery_prefix>/<component>/<node_id>/<object_id>/config`). When this is on,
+   * the first device payload after boot follows Home Assistant's migration steps:
+   * it publishes `{"migrate_discovery": true}` to each entity's old topic, then the
+   * device payload, and clears the old topics a few seconds later. The entities keep
+   * their entity IDs, names and history.
+   *
+   * Turn it on for one boot on devices that ran an older version, then turn it off
+   * again. Call it before the first tick() after connecting.
+   *
+   * @param enable       Whether to migrate
+   * @param clearDelayMs Wait between the device payload and clearing the old topics (default 5 s)
+   */
+  void setMigrateLegacyDiscovery(bool enable, uint32_t clearDelayMs = 5000);
+
+  /**
    * @brief Periodic processing hook. Call this from loop().
    *
-   * Drives synchronous transports (e.g. PubSubClient). After a connect it subscribes
-   * to the command topics and sends the stored configs and states. It also sends them
-   * once the random delay after a Home Assistant birth message has passed.
-   *
-   * All publishing happens here, in loop(), even when the transport reports
-   * connections from another task (AsyncMqttClient on ESP32).
+   * It drives the transport (connection changes and reconnect), handles queued
+   * commands and birth messages, and does all publishing:
+   * - after a connect: subscribes, then publishes the device payload, "online" and the stored states
+   * - after entities were added or removed: publishes the device payload and the stored states
+   * - after a Home Assistant birth message and a random delay: publishes everything again
    */
   void tick();
 
@@ -303,10 +330,10 @@ public:
   void setRepublishDelay(uint32_t maxDelayMs);
 
   /**
-   * @brief Publish all stored discovery configs, availability "online" and the last states now.
+   * @brief Publish the device payload, availability "online" and the last states now.
    *
-   * This happens automatically on every connect and after a Home Assistant birth message.
-   * Does nothing while disconnected.
+   * This happens automatically on every connect, after entity changes and after a
+   * Home Assistant birth message. Does nothing while disconnected.
    */
   void republishAll();
 
@@ -327,69 +354,71 @@ public:
   void publishAvailabilityOffline(bool retained = true, uint8_t qos = 1);
 
   /**
-   * @brief Publish a sensor Discovery config (retained by default).
+   * @brief Add or update a sensor. The device payload is published from the next tick().
    *
-   * @param cfg      Sensor configuration
-   * @param retained Retain flag (recommended true)
-   * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return false if the config is invalid or the publish failed. While disconnected the
-   *         config is stored and sent on connect, and this returns true.
+   * @param cfg Sensor configuration
+   * @return false if setDevice() wasn't called, object_id is missing, or the config couldn't be built
    */
-  bool publishSensorDiscovery(const HaSensorConfig& cfg, bool retained = true, uint8_t qos = 1);
+  bool publishSensorDiscovery(const HaSensorConfig& cfg);
 
   /**
-   * @brief Publish a switch Discovery config (retained by default).
+   * @brief Add or update a switch. The device payload is published from the next tick().
    *
-   * @param cfg      Switch configuration
-   * @param retained Retain flag (recommended true)
-   * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return false if the config is invalid or the publish failed. While disconnected the
-   *         config is stored and sent on connect, and this returns true.
+   * Commands for it are passed to the onCommand() handler.
+   *
+   * @param cfg Switch configuration
+   * @return false if setDevice() wasn't called, object_id is missing, or the config couldn't be built
    */
-  bool publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retained = true, uint8_t qos = 1);
+  bool publishSwitchDiscovery(const HaSwitchConfig& cfg);
 
   /**
-   * @brief Publish a binary_sensor Discovery config (retained by default).
+   * @brief Add or update a binary_sensor. The device payload is published from the next tick().
    *
-   * @param cfg      Binary sensor configuration
-   * @param retained Retain flag (recommended true)
-   * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return false if the config is invalid or the publish failed. While disconnected the
-   *         config is stored and sent on connect, and this returns true.
+   * @param cfg Binary sensor configuration
+   * @return false if setDevice() wasn't called, object_id is missing, or the config couldn't be built
    */
-  bool publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained = true, uint8_t qos = 1);
+  bool publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg);
 
   /**
-   * @brief Publish a button Discovery config (retained by default).
+   * @brief Add or update a button. The device payload is published from the next tick().
    *
-   * @param cfg      Button configuration
-   * @param retained Retain flag (recommended true)
-   * @param qos      QoS level (recommended 1 for discovery if supported)
-   * @return false if the config is invalid or the publish failed. While disconnected the
-   *         config is stored and sent on connect, and this returns true.
+   * Presses are passed to the onCommand() handler.
+   *
+   * @param cfg Button configuration
+   * @return false if setDevice() wasn't called, object_id is missing, or the config couldn't be built
    */
-  bool publishButtonDiscovery(const HaButtonConfig& cfg, bool retained = true, uint8_t qos = 1);
-
+  bool publishButtonDiscovery(const HaButtonConfig& cfg);
 
   /**
-   * @brief Remove an entity from Home Assistant by clearing its retained config topic.
+   * @brief Remove one entity from the device.
    *
-   * Home Assistant removes the entity when the Discovery config topic is published
-   * with an empty payload and retain=true. Commands for a removed switch or button
-   * are no longer passed to the command handler.
+   * From the next tick(), the device payload is published twice: once with the entity
+   * as a removal stub (`{"p": "<component>"}`), then without it. Commands for a removed
+   * switch or button are no longer passed to the command handler, and its stored state
+   * is dropped. Removing the last entity also clears the device discovery topic.
    *
    * @param component Component name (e.g. "sensor", "switch")
-   * @param object_id Entity object_id used in the config topic
-   * @param qos       QoS level (recommended 1 if supported)
-   * @return true if publish was accepted by transport, false otherwise
+   * @param object_id Entity object_id
+   * @return true if the entity was found
    */
-  bool removeEntity(const char* component, const char* object_id, uint8_t qos = 1);
+  bool removeEntity(const char* component, const char* object_id);
+
+  /**
+   * @brief Remove the device and all its entities from Home Assistant.
+   *
+   * Publishes an empty retained payload to the device discovery topic right away
+   * (if connected), and forgets all entities and states.
+   *
+   * @return true if the publish was accepted by the transport
+   */
+  bool removeDevice();
 
   /**
    * @brief Publish an entity state payload using default state topic for object_id.
    *
    * The last payload per entity is stored and sent again on connect and after a
-   * Home Assistant restart. While disconnected it is only stored, and this returns true.
+   * Home Assistant restart. While disconnected, or while the device payload is waiting
+   * to be published, it is only stored, and this returns true.
    *
    * @param object_id Entity object_id
    * @param payload   Null-terminated payload string
@@ -410,30 +439,19 @@ public:
    */
   bool publishStateSwitch(const char* object_id, bool on, bool retained = false, uint8_t qos = 0);
 
-  /**
-   * @brief Publish a button "press" command to the default command topic.
-   *
-   * @param object_id Entity object_id
-   * @param payload   Payload string to publish (if nullptr uses default "PRESS")
-   * @param retained  Retain flag (usually false)
-   * @param qos       QoS level (usually 0 or 1)
-   * @return true if publish was accepted by transport, false otherwise
-   */
-  bool pressButton(const char* object_id, const char* payload = nullptr, bool retained = false, uint8_t qos = 0);
-
   // Convenience overloads for std::string parameters
 
   /** @brief Overload of removeEntity using std::string. */
-  inline bool removeEntity(const std::string& component, const std::string& object_id, uint8_t qos = 1) {
-    return removeEntity(component.c_str(), object_id.c_str(), qos);
+  inline bool removeEntity(const std::string& component, const std::string& object_id) {
+    return removeEntity(component.c_str(), object_id.c_str());
   }
   /** @brief Overload of removeEntity using std::string for object_id. */
-  inline bool removeEntity(const char* component, const std::string& object_id, uint8_t qos = 1) {
-    return removeEntity(component, object_id.c_str(), qos);
+  inline bool removeEntity(const char* component, const std::string& object_id) {
+    return removeEntity(component, object_id.c_str());
   }
   /** @brief Overload of removeEntity using std::string for component. */
-  inline bool removeEntity(const std::string& component, const char* object_id, uint8_t qos = 1) {
-    return removeEntity(component.c_str(), object_id, qos);
+  inline bool removeEntity(const std::string& component, const char* object_id) {
+    return removeEntity(component.c_str(), object_id);
   }
 
   /** @brief Overload of publishState using std::string. */
@@ -454,90 +472,29 @@ public:
     return publishStateSwitch(object_id.c_str(), on, retained, qos);
   }
 
-  /** @brief Overload of pressButton using std::string. */
-  inline bool pressButton(const std::string& object_id, const std::string& payload, bool retained = false, uint8_t qos = 0) {
-    return pressButton(object_id.c_str(), payload.c_str(), retained, qos);
-  }
-  /** @brief Overload of pressButton using std::string for object_id. */
-  inline bool pressButton(const std::string& object_id, const char* payload, bool retained = false, uint8_t qos = 0) {
-    return pressButton(object_id.c_str(), payload, retained, qos);
-  }
-  /** @brief Overload of pressButton using std::string for object_id (no payload). */
-  inline bool pressButton(const std::string& object_id, bool retained = false, uint8_t qos = 0) {
-    return pressButton(object_id.c_str(), nullptr, retained, qos);
-  }
-
 private:
-  static void onTransportConnectThunk(void* ctx);
-  void onTransportConnect();
-  static void onTransportMessageThunk(void* ctx, const char* topic, const uint8_t* payload, size_t len);
-  void onTransportMessage(const char* topic, const uint8_t* payload, size_t len);
+  /** @brief Lock for the incoming message queue (shared with the AsyncTCP task on ESP32). */
+#if defined(ESP32) || !defined(ARDUINO)
+  using QueueMutex = std::mutex;
+#else
+  // ESP8266 network callbacks never interrupt loop(), so no lock is needed
+  struct QueueMutex {
+    void lock() {}
+    void unlock() {}
+  };
+#endif
 
-  void registerCommandTopic(const std::string& topic, const char* object_id);
-  void unregisterCommandTopics(const char* object_id);
-
-  std::string buildConfigTopic(const char* component, const char* object_id) const;
-  std::string buildDefaultStateTopic(const char* object_id) const;
-  std::string buildDefaultCommandTopic(const char* object_id) const;
-  std::string buildDefaultAvailabilityTopic() const;
-
-  bool publishConfigJson(const char* topic, const char* json, bool retained, uint8_t qos);
-  bool storeAndPublishConfig(const char* component, const char* object_id,
-                             const char* json, bool retained, uint8_t qos);
-  std::string buildBirthTopic() const;
-  bool canPublishNow() const;
-
-  // Each returns the serialized config, or an empty string on failure
-  std::string buildSensorConfigJson(const HaSensorConfig& cfg) const;
-  std::string buildSwitchConfigJson(const HaSwitchConfig& cfg) const;
-  std::string buildBinarySensorConfigJson(const HaBinarySensorConfig& cfg) const;
-  std::string buildButtonConfigJson(const HaButtonConfig& cfg) const;
-
-  void addCommonFields(JsonDocument& doc, const char* component, const HaEntityCommon& common) const;
-  std::string stateTopicFor(const HaEntityCommon& common) const;
-  static std::string serializeDoc(const JsonDocument& doc);
-
-  void addDeviceObject(JsonDocument& doc) const;
-  bool hasDevice() const { return !_device.node_id.empty(); }
-
-  /** @brief Owned copies of the HaDeviceInfo strings (empty means not set). */
-  /** @brief Origin information sent as `o`. */
-  struct OriginData {
-    std::string name = JBHAMQTTDISCOVERY_NAME;
-    std::string sw_version = JBHAMQTTDISCOVERY_VERSION;
-    std::string url = JBHAMQTTDISCOVERY_URL;
+  /** @brief A component of the device payload. */
+  struct Component {
+    std::string component;  // platform, e.g. "sensor"
+    std::string object_id;  // key in "cmps"
+    std::string json;       // serialized component config
   };
 
-  struct DeviceData {
-    std::string node_id;
-    std::string name;
-    std::string manufacturer;
-    std::string model;
-    std::string sw_version;
-    std::string identifiers;
-  };
-
-private:
-  MqttTransport& _transport;
-  std::string _discoveryPrefix;
-  std::string _baseTopicPrefix;
   /** @brief A command topic and the object_id it belongs to. */
   struct CommandRoute {
     std::string topic;
     std::string object_id;
-  };
-
-  JBLogger _log;
-  DeviceData _device;
-  OriginData _origin;
-  /** @brief A published discovery config, kept for re-publishing. */
-  struct EntityConfig {
-    std::string component;
-    std::string object_id;
-    std::string topic;
-    std::string json;
-    bool retained;
-    uint8_t qos;
   };
 
   /** @brief The last state published on a topic, kept for re-publishing. */
@@ -548,16 +505,102 @@ private:
     uint8_t qos;
   };
 
+  /** @brief A message received from the transport, handled in tick(). */
+  struct IncomingMessage {
+    std::string topic;
+    std::string payload;
+  };
+
+  /** @brief Origin information sent as `o`. */
+  struct OriginData {
+    std::string name = JBHAMQTTDISCOVERY_NAME;
+    std::string sw_version = JBHAMQTTDISCOVERY_VERSION;
+    std::string url = JBHAMQTTDISCOVERY_URL;
+  };
+
+  /** @brief Owned copies of the HaDeviceInfo strings (empty means not set). */
+  struct DeviceData {
+    std::string node_id;
+    std::string name;
+    std::string manufacturer;
+    std::string model;
+    std::string sw_version;
+    std::string identifiers;
+  };
+
+  enum class MigrationState { Off, Pending, WaitingToClear, Done };
+
+  static void onTransportConnectThunk(void* ctx);
+  void onTransportConnect();
+  static void onTransportMessageThunk(void* ctx, const char* topic, const uint8_t* payload, size_t len);
+  void onTransportMessage(const char* topic, const uint8_t* payload, size_t len);
+  void processIncoming();
+  void handleMessage(const IncomingMessage& msg);
+
+  void registerCommandTopic(const std::string& topic, const char* object_id);
+  void unregisterCommandTopics(const char* object_id);
+  void subscribeAll();
+
+  std::string buildDeviceTopic() const;
+  std::string buildLegacyConfigTopic(const std::string& component, const std::string& object_id) const;
+  std::string buildDefaultStateTopic(const char* object_id) const;
+  std::string buildDefaultCommandTopic(const char* object_id) const;
+  std::string buildDefaultAvailabilityTopic() const;
+  std::string buildBirthTopic() const;
+
+  bool addComponent(const char* component, const char* object_id, std::string json);
+  std::string buildDevicePayload(bool withRemovalStubs) const;
+  void publishDevicePayload();
+  void runMigrationStart();
+  void runMigrationClear();
+  bool publishRetained(const std::string& topic, const std::string& payload, uint8_t qos);
+  bool canPublishStateNow() const;
+
+  // Each returns the serialized component config, or an empty string on failure
+  std::string buildSensorConfigJson(const HaSensorConfig& cfg) const;
+  std::string buildSwitchConfigJson(const HaSwitchConfig& cfg) const;
+  std::string buildBinarySensorConfigJson(const HaBinarySensorConfig& cfg) const;
+  std::string buildButtonConfigJson(const HaButtonConfig& cfg) const;
+
+  void addCommonFields(JsonDocument& doc, const char* component, const HaEntityCommon& common) const;
+  std::string stateTopicFor(const HaEntityCommon& common) const;
+  std::string sanitizeEntityId(const char* entity_id) const;
+  static std::string serializeDoc(const JsonDocument& doc);
+
+  void addDeviceObject(JsonDocument& doc) const;
+  bool hasDevice() const { return !_device.node_id.empty(); }
+
+  MqttTransport& _transport;
+  std::string _discoveryPrefix;
+  std::string _baseTopicPrefix;
+  mutable JBLogger _log;  // logging from const methods doesn't change state
+  DeviceData _device;
+  OriginData _origin;
+
+  std::vector<Component> _components;
+  std::vector<Component> _removed;   // removed since the last device payload; json unused
+  bool _clearDeviceTopic = false;    // last entity removed: clear the device topic after the stubs
+  bool _configDirty = false;         // device payload changed and not published yet
   std::vector<CommandRoute> _commands;
-  std::vector<EntityConfig> _entities;
   std::vector<StateEntry> _states;
   HaCommandCallback _onCommand;
 
+  // Filled from the network task with AsyncMqttClient, emptied in tick()
+  QueueMutex _incomingLock;
+  std::vector<IncomingMessage> _incoming;
+  static constexpr size_t MAX_INCOMING = 16;
+
   // Set from the network task with AsyncMqttClient, read in tick()
   volatile bool _connectPending = false;
-  volatile bool _republishPending = false;
-  volatile uint32_t _republishAt = 0;
+
+  bool _republishPending = false;
+  uint32_t _republishAt = 0;
   uint32_t _republishDelayMaxMs = 5000;
+
+  MigrationState _migration = MigrationState::Off;
+  uint32_t _migrationClearAt = 0;
+  uint32_t _migrationClearDelayMs = 5000;
+  std::vector<std::string> _legacyTopics;
 };
 
 /** @} */
