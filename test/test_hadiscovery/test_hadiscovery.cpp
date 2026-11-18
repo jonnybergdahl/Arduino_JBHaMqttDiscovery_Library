@@ -941,6 +941,7 @@ void test_light_components(void) {
     TEST_ASSERT_EQUAL_STRING("rgb", cmps["rgb"]["supported_color_modes"][0]);
     TEST_ASSERT_EQUAL_STRING("devices/test_node/rgb/set", cmps["rgb"]["cmd_t"]);
     TEST_ASSERT_FALSE(cmps["rgb"]["brightness_scale"].is<int>());
+    TEST_ASSERT_TRUE(cmps["rgb"]["brightness"].as<bool>());  // brightness sent separately from color
 
     TEST_ASSERT_EQUAL_STRING("color_temp", cmps["ct"]["supported_color_modes"][0]);
     TEST_ASSERT_TRUE(cmps["ct"]["color_temp_kelvin"].as<bool>());
@@ -949,6 +950,7 @@ void test_light_components(void) {
     TEST_ASSERT_EQUAL(100, cmps["ct"]["brightness_scale"].as<int>());
 
     TEST_ASSERT_EQUAL_STRING("onoff", cmps["onoff"]["supported_color_modes"][0]);
+    TEST_ASSERT_FALSE(cmps["onoff"]["brightness"].is<bool>());
 }
 
 void test_parse_light_command(void) {

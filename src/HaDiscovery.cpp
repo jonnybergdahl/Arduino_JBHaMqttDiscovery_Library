@@ -945,6 +945,9 @@ std::string HaDiscovery::buildLightConfigJson(const HaLightConfig& cfg) const {
       break;
     case HaLightColorMode::Rgb:
       modes.add("rgb");
+      // Without this, Home Assistant folds brightness into the RGB values and
+      // never sends a separate "brightness"
+      doc["brightness"] = true;
       break;
   }
   if (cfg.color_mode != HaLightColorMode::OnOff && cfg.brightness_scale != 255) {
