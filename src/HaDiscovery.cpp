@@ -238,23 +238,35 @@ void HaDiscovery::subscribeAll() {
 }
 
 void HaDiscovery::registerCommandTopic(const std::string& topic, const char* object_id) {
-  bool subscribeNow = _transport.connected() && !_connectPending;
+  // An entity can have several command topics (e.g. a cover's position); one route per topic
   for (CommandRoute& route : _commands) {
-    if (route.object_id == object_id) {
-      if (route.topic == topic) {
-        return;
-      }
-      route.topic = topic;
-      if (subscribeNow) {
-        _transport.subscribe(topic.c_str(), 1);
-      }
+    if (route.topic == topic) {
+      route.object_id = object_id;
       return;
     }
   }
   _commands.push_back({topic, object_id});
-  if (subscribeNow) {
+  if (_transport.connected() && !_connectPending) {
     _transport.subscribe(topic.c_str(), 1);
   }
+}
+
+void HaDiscovery::setCommandTopics(const char* object_id, const std::vector<std::string>& topics) {
+  // Drop routes the entity no longer has, keep the rest (already subscribed), add new ones
+  for (auto it = _commands.begin(); it != _commands.end();) {
+    bool keep = it->object_id != object_id;
+    for (const std::string& t : topics) {
+      keep = keep || it->topic == t;
+    }
+    it = keep ? it + 1 : _commands.erase(it);
+  }
+  for (const std::string& t : topics) {
+    registerCommandTopic(t, object_id);
+  }
+}
+
+std::string HaDiscovery::commandTopicFor(const char* override_topic, const char* object_id) const {
+  return override_topic ? std::string(override_topic) : buildDefaultCommandTopic(object_id);
 }
 
 void HaDiscovery::unregisterCommandTopics(const char* object_id) {
@@ -302,9 +314,10 @@ bool HaDiscovery::publishState(const char* object_id, const char* payload, bool 
   if (!hasDevice() || !object_id || !payload) {
     return false;
   }
+  return publishToTopic(buildDefaultStateTopic(object_id), payload, retained, qos);
+}
 
-  std::string topic = buildDefaultStateTopic(object_id);
-
+bool HaDiscovery::publishToTopic(const std::string& topic, const char* payload, bool retained, uint8_t qos) {
   // Remember the last state so it can be sent again after a reconnect or HA restart
   bool stored = false;
   for (StateEntry& st : _states) {
@@ -322,7 +335,7 @@ bool HaDiscovery::publishState(const char* object_id, const char* payload, bool 
 
   if (!canPublishStateNow()) {
 #ifdef HAS_LOG
-    _log.debug("State for %s will be sent after the device payload", object_id);
+    _log.debug("State for %s will be sent after the device payload", topic.c_str());
 #endif
     return true;
   }
@@ -376,10 +389,7 @@ bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg) {
 #endif
     return false;
   }
-  registerCommandTopic(cfg.command_topic_override
-                         ? std::string(cfg.command_topic_override)
-                         : buildDefaultCommandTopic(cfg.common.object_id),
-                       cfg.common.object_id);
+  setCommandTopics(cfg.common.object_id, {commandTopicFor(cfg.command_topic_override, cfg.common.object_id)});
   return addComponent("switch", cfg.common.object_id, std::move(json));
 }
 
@@ -408,10 +418,7 @@ bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg) {
 #endif
     return false;
   }
-  registerCommandTopic(cfg.command_topic_override
-                         ? std::string(cfg.command_topic_override)
-                         : buildDefaultCommandTopic(cfg.common.object_id),
-                       cfg.common.object_id);
+  setCommandTopics(cfg.common.object_id, {commandTopicFor(cfg.command_topic_override, cfg.common.object_id)});
   return addComponent("button", cfg.common.object_id, std::move(json));
 }
 
@@ -472,15 +479,15 @@ bool HaDiscovery::removeEntity(const char* component, const char* object_id) {
   }
   _configDirty = true;
 
-  if (strcmp(component, "switch") == 0 || strcmp(component, "button") == 0) {
-    unregisterCommandTopics(object_id);
-  }
+  unregisterCommandTopics(object_id);
 
-  std::string stateTopic = buildDefaultStateTopic(object_id);
-  for (auto it = _states.begin(); it != _states.end(); ++it) {
-    if (it->topic == stateTopic) {
-      _states.erase(it);
-      break;
+  // Drop its stored states (state, and position for a cover)
+  std::string prefix = _baseTopicPrefix + "/" + _device.node_id + "/" + object_id + "/";
+  for (auto it = _states.begin(); it != _states.end();) {
+    if (it->topic.compare(0, prefix.size(), prefix) == 0) {
+      it = _states.erase(it);
+    } else {
+      ++it;
     }
   }
   return true;
@@ -697,6 +704,18 @@ void HaDiscovery::addCommonFields(JsonDocument& doc, const char* component, cons
   if (common.icon) {
     doc["ic"] = common.icon;
   }
+
+  if (common.entity_category == HaEntityCategory::Diagnostic) {
+    doc["ent_cat"] = "diagnostic";
+  } else if (common.entity_category == HaEntityCategory::Config) {
+    if (strcmp(component, "sensor") == 0 || strcmp(component, "binary_sensor") == 0) {
+#ifdef HAS_LOG
+      _log.warning("%s %s can't have entity category config, leaving it out", component, common.object_id);
+#endif
+    } else {
+      doc["ent_cat"] = "config";
+    }
+  }
 }
 
 std::string HaDiscovery::stateTopicFor(const HaEntityCommon& common) const {
@@ -728,6 +747,9 @@ std::string HaDiscovery::buildSensorConfigJson(const HaSensorConfig& cfg) const 
   }
   if (cfg.state_class) {
     doc["stat_cla"] = cfg.state_class;
+  }
+  if (cfg.expire_after) {
+    doc["exp_aft"] = cfg.expire_after;
   }
   return serializeDoc(doc);
 }
@@ -763,5 +785,284 @@ std::string HaDiscovery::buildBinarySensorConfigJson(const HaBinarySensorConfig&
   if (cfg.device_class) {
     doc["dev_cla"] = cfg.device_class;
   }
+  if (cfg.expire_after) {
+    doc["exp_aft"] = cfg.expire_after;
+  }
   return serializeDoc(doc);
+}
+
+// ---------------------------------------------------------------------------
+// number, select, text, light, cover
+// ---------------------------------------------------------------------------
+
+bool HaDiscovery::addEntity(const char* component, const HaEntityCommon& common, std::string json) {
+  if (json.empty()) {
+#ifdef HAS_LOG
+    _log.error("Could not build discovery config for %s (out of memory?)", common.object_id);
+#endif
+    return false;
+  }
+  return addComponent(component, common.object_id, std::move(json));
+}
+
+bool HaDiscovery::publishNumberDiscovery(const HaNumberConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  if (cfg.min > cfg.max || cfg.step <= 0) {
+#ifdef HAS_LOG
+    _log.error("number %s: min must be <= max and step > 0", cfg.common.object_id);
+#endif
+    return false;
+  }
+  setCommandTopics(cfg.common.object_id, {commandTopicFor(cfg.command_topic_override, cfg.common.object_id)});
+  return addEntity("number", cfg.common, buildNumberConfigJson(cfg));
+}
+
+bool HaDiscovery::publishSelectDiscovery(const HaSelectConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  if (cfg.options.empty()) {
+#ifdef HAS_LOG
+    _log.error("select %s needs at least one option", cfg.common.object_id);
+#endif
+    return false;
+  }
+  setCommandTopics(cfg.common.object_id, {commandTopicFor(cfg.command_topic_override, cfg.common.object_id)});
+  return addEntity("select", cfg.common, buildSelectConfigJson(cfg));
+}
+
+bool HaDiscovery::publishTextDiscovery(const HaTextConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  if (cfg.min_length > cfg.max_length || cfg.max_length > 255) {
+#ifdef HAS_LOG
+    _log.error("text %s: min_length must be <= max_length <= 255", cfg.common.object_id);
+#endif
+    return false;
+  }
+  setCommandTopics(cfg.common.object_id, {commandTopicFor(cfg.command_topic_override, cfg.common.object_id)});
+  return addEntity("text", cfg.common, buildTextConfigJson(cfg));
+}
+
+bool HaDiscovery::publishLightDiscovery(const HaLightConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  setCommandTopics(cfg.common.object_id, {commandTopicFor(cfg.command_topic_override, cfg.common.object_id)});
+  return addEntity("light", cfg.common, buildLightConfigJson(cfg));
+}
+
+bool HaDiscovery::publishCoverDiscovery(const HaCoverConfig& cfg) {
+  if (!hasDevice() || !cfg.common.object_id) {
+    return false;
+  }
+  std::vector<std::string> topics{commandTopicFor(cfg.command_topic_override, cfg.common.object_id)};
+  if (cfg.has_position) {
+    topics.push_back(_baseTopicPrefix + "/" + _device.node_id + "/" + cfg.common.object_id + "/set_position");
+  }
+  setCommandTopics(cfg.common.object_id, topics);
+  return addEntity("cover", cfg.common, buildCoverConfigJson(cfg));
+}
+
+std::string HaDiscovery::buildNumberConfigJson(const HaNumberConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "number", cfg.common);
+  doc["stat_t"] = stateTopicFor(cfg.common);
+  doc["cmd_t"] = commandTopicFor(cfg.command_topic_override, cfg.common.object_id);
+  doc["min"] = cfg.min;
+  doc["max"] = cfg.max;
+  doc["step"] = cfg.step;
+  if (cfg.mode == HaNumberMode::Box) {
+    doc["mode"] = "box";
+  } else if (cfg.mode == HaNumberMode::Slider) {
+    doc["mode"] = "slider";
+  }
+  if (cfg.unit_of_measurement) {
+    doc["unit_of_meas"] = cfg.unit_of_measurement;
+  }
+  if (cfg.device_class) {
+    doc["dev_cla"] = cfg.device_class;
+  }
+  return serializeDoc(doc);
+}
+
+std::string HaDiscovery::buildSelectConfigJson(const HaSelectConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "select", cfg.common);
+  doc["stat_t"] = stateTopicFor(cfg.common);
+  doc["cmd_t"] = commandTopicFor(cfg.command_topic_override, cfg.common.object_id);
+  JsonArray ops = doc["ops"].to<JsonArray>();
+  for (const char* option : cfg.options) {
+    if (option) {
+      ops.add(option);
+    }
+  }
+  return serializeDoc(doc);
+}
+
+std::string HaDiscovery::buildTextConfigJson(const HaTextConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "text", cfg.common);
+  doc["stat_t"] = stateTopicFor(cfg.common);
+  doc["cmd_t"] = commandTopicFor(cfg.command_topic_override, cfg.common.object_id);
+  if (cfg.min_length != 0) {
+    doc["min"] = cfg.min_length;
+  }
+  if (cfg.max_length != 255) {
+    doc["max"] = cfg.max_length;
+  }
+  if (cfg.mode == HaTextMode::Password) {
+    doc["mode"] = "password";
+  }
+  if (cfg.pattern) {
+    doc["ptrn"] = cfg.pattern;
+  }
+  return serializeDoc(doc);
+}
+
+std::string HaDiscovery::buildLightConfigJson(const HaLightConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "light", cfg.common);
+  doc["schema"] = "json";
+  doc["stat_t"] = stateTopicFor(cfg.common);
+  doc["cmd_t"] = commandTopicFor(cfg.command_topic_override, cfg.common.object_id);
+  JsonArray modes = doc["supported_color_modes"].to<JsonArray>();
+  switch (cfg.color_mode) {
+    case HaLightColorMode::OnOff:
+      modes.add("onoff");
+      break;
+    case HaLightColorMode::Brightness:
+      modes.add("brightness");
+      break;
+    case HaLightColorMode::ColorTemp:
+      modes.add("color_temp");
+      doc["color_temp_kelvin"] = true;
+      doc["min_kelvin"] = cfg.min_kelvin;
+      doc["max_kelvin"] = cfg.max_kelvin;
+      break;
+    case HaLightColorMode::Rgb:
+      modes.add("rgb");
+      break;
+  }
+  if (cfg.color_mode != HaLightColorMode::OnOff && cfg.brightness_scale != 255) {
+    doc["brightness_scale"] = cfg.brightness_scale;
+  }
+  return serializeDoc(doc);
+}
+
+std::string HaDiscovery::buildCoverConfigJson(const HaCoverConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "cover", cfg.common);
+  doc["stat_t"] = stateTopicFor(cfg.common);
+  doc["cmd_t"] = commandTopicFor(cfg.command_topic_override, cfg.common.object_id);
+  if (cfg.device_class) {
+    doc["dev_cla"] = cfg.device_class;
+  }
+  if (cfg.payload_open) {
+    doc["pl_open"] = cfg.payload_open;
+  }
+  if (cfg.payload_close) {
+    doc["pl_cls"] = cfg.payload_close;
+  }
+  if (cfg.payload_stop) {
+    if (*cfg.payload_stop) {
+      doc["pl_stop"] = cfg.payload_stop;
+    } else {
+      doc["pl_stop"] = nullptr;  // the cover can't stop
+    }
+  }
+  if (cfg.has_position) {
+    std::string base = _baseTopicPrefix + "/" + _device.node_id + "/" + cfg.common.object_id;
+    doc["pos_t"] = base + "/position";
+    doc["set_pos_t"] = base + "/set_position";
+  }
+  return serializeDoc(doc);
+}
+
+// ---------------------------------------------------------------------------
+// State helpers
+// ---------------------------------------------------------------------------
+
+bool HaDiscovery::publishStateNumber(const char* object_id, double value, uint8_t decimals, bool retained, uint8_t qos) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%.*f", decimals > 9 ? 9 : decimals, value);
+  return publishState(object_id, buf, retained, qos);
+}
+
+bool HaDiscovery::publishStateLight(const char* object_id, const HaLightState& state, bool retained, uint8_t qos) {
+  JsonDocument doc;
+  doc["state"] = state.on ? kOn : kOff;
+  if (state.brightness >= 0) {
+    doc["brightness"] = state.brightness;
+  }
+  if (state.r >= 0) {
+    doc["color_mode"] = "rgb";
+    JsonObject color = doc["color"].to<JsonObject>();
+    color["r"] = state.r;
+    color["g"] = state.g;
+    color["b"] = state.b;
+  } else if (state.color_temp_kelvin >= 0) {
+    doc["color_mode"] = "color_temp";
+    doc["color_temp"] = state.color_temp_kelvin;
+  } else if (state.brightness >= 0) {
+    doc["color_mode"] = "brightness";
+  } else {
+    doc["color_mode"] = "onoff";
+  }
+  std::string json = serializeDoc(doc);
+  return publishState(object_id, json.c_str(), retained, qos);
+}
+
+bool HaDiscovery::publishStatePosition(const char* object_id, int position, bool retained, uint8_t qos) {
+  if (!hasDevice() || !object_id) {
+    return false;
+  }
+  if (position < 0) {
+    position = 0;
+  } else if (position > 100) {
+    position = 100;
+  }
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", position);
+  return publishToTopic(_baseTopicPrefix + "/" + _device.node_id + "/" + object_id + "/position", buf, retained, qos);
+}
+
+bool HaDiscovery::parseLightCommand(const char* payload, HaLightCommand& out) {
+  out = HaLightCommand();
+  if (!payload) {
+    return false;
+  }
+  JsonDocument doc;
+  if (deserializeJson(doc, payload) || !doc.is<JsonObject>()) {
+    return false;
+  }
+  if (doc["state"].is<const char*>()) {
+    out.has_state = true;
+    out.on = strcmp(doc["state"].as<const char*>(), kOn) == 0;
+  }
+  if (doc["brightness"].is<int>()) {
+    out.has_brightness = true;
+    out.brightness = doc["brightness"].as<uint16_t>();
+  }
+  if (doc["color_temp"].is<int>()) {
+    out.has_color_temp = true;
+    out.color_temp_kelvin = doc["color_temp"].as<uint16_t>();
+  }
+  if (doc["color"].is<JsonObject>()) {
+    JsonObject color = doc["color"];
+    if (color["r"].is<int>() && color["g"].is<int>() && color["b"].is<int>()) {
+      out.has_color = true;
+      out.r = color["r"].as<uint8_t>();
+      out.g = color["g"].as<uint8_t>();
+      out.b = color["b"].as<uint8_t>();
+    }
+  }
+  if (doc["transition"].is<float>()) {
+    out.has_transition = true;
+    out.transition = doc["transition"].as<float>();
+  }
+  return true;
 }

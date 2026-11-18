@@ -11,6 +11,7 @@
 //   mqttdrop                   drop the MQTT connection (auto-reconnect should follow)
 //   wifidrop                   drop Wi-Fi for 15 s
 //   alt online|offline         publish the availability override topic
+//   pause                      stop/start sensor updates (uptime expires after 30 s)
 //   restart                    ESP.restart()
 //
 // Builds for the TinyS3 (ESP32-S3) and the Wemos D1 mini (ESP8266).
@@ -59,6 +60,53 @@ bool relayOn = false;
 bool lastButton = false;
 unsigned long pings = 0;
 unsigned long wifiBackAt = 0;
+bool sensorsPaused = false;
+unsigned long reportIntervalMs = 10000;
+
+// Light
+bool ledOn = false;
+uint16_t ledBrightness = 128;
+uint8_t ledR = 255, ledG = 120, ledB = 0;
+
+// Simulated cover: moves 10% per second towards coverTarget
+int coverPosition = 0;
+int coverTarget = 0;
+unsigned long lastCoverStep = 0;
+
+void applyLed() {
+#ifdef ESP8266
+  // Built-in LED on GPIO2, active low
+  analogWrite(LED_BUILTIN, ledOn ? 255 - ledBrightness : 255);
+#elif defined(RGB_BUILTIN)
+  float k = ledOn ? ledBrightness / 255.0f : 0;
+  rgbLedWrite(RGB_BUILTIN, ledR * k, ledG * k, ledB * k);
+#endif
+}
+
+void publishLight() {
+  HaLightState st;
+  st.on = ledOn;
+  st.brightness = ledBrightness;
+#ifndef ESP8266
+  st.r = ledR;
+  st.g = ledG;
+  st.b = ledB;
+#endif
+  ha.publishStateLight("led", st);
+}
+
+void publishCover() {
+  const char* state;
+  if (coverPosition < coverTarget) {
+    state = "opening";
+  } else if (coverPosition > coverTarget) {
+    state = "closing";
+  } else {
+    state = coverPosition == 0 ? "closed" : "open";
+  }
+  ha.publishState("blind", state);
+  ha.publishStatePosition("blind", coverPosition);
+}
 
 void onCommand(const char* objectId, const char* payload) {
   logger.info("Command for %s: %s", objectId, payload);
@@ -68,6 +116,31 @@ void onCommand(const char* objectId, const char* payload) {
   } else if (strcmp(objectId, "ping") == 0) {
     pings++;
     ha.publishState("pings", std::to_string(pings));
+  } else if (strcmp(objectId, "interval") == 0) {
+    reportIntervalMs = static_cast<unsigned long>(atof(payload) * 1000);
+    ha.publishStateNumber("interval", reportIntervalMs / 1000.0, 0);
+  } else if (strcmp(objectId, "mode") == 0 || strcmp(objectId, "message") == 0) {
+    ha.publishState(objectId, payload);
+  } else if (strcmp(objectId, "led") == 0) {
+    HaLightCommand cmd;
+    if (HaDiscovery::parseLightCommand(payload, cmd)) {
+      if (cmd.has_state) ledOn = cmd.on;
+      if (cmd.has_brightness) ledBrightness = cmd.brightness;
+      if (cmd.has_color) { ledR = cmd.r; ledG = cmd.g; ledB = cmd.b; }
+      applyLed();
+      publishLight();
+    }
+  } else if (strcmp(objectId, "blind") == 0) {
+    if (strcmp(payload, "OPEN") == 0) {
+      coverTarget = 100;
+    } else if (strcmp(payload, "CLOSE") == 0) {
+      coverTarget = 0;
+    } else if (strcmp(payload, "STOP") == 0) {
+      coverTarget = coverPosition;
+    } else {
+      coverTarget = constrain(atoi(payload), 0, 100);
+    }
+    publishCover();
   }
 }
 
@@ -77,12 +150,14 @@ void addEntities() {
                 .entity_id = "jbhatest_uptime" },
     .unit_of_measurement = "s",
     .device_class = "duration",
-    .state_class = "total_increasing"
+    .state_class = "total_increasing",
+    .expire_after = 30
   };
   ha.publishSensorDiscovery(uptime);
 
   HaSensorConfig rssi{
-    .common = { .object_id = "rssi", .name = "Wi-Fi signal" },
+    .common = { .object_id = "rssi", .name = "Wi-Fi signal",
+                .entity_category = HaEntityCategory::Diagnostic },
     .unit_of_measurement = "dBm",
     .device_class = "signal_strength",
     .state_class = "measurement"
@@ -90,7 +165,8 @@ void addEntities() {
   ha.publishSensorDiscovery(rssi);
 
   HaSensorConfig heap{
-    .common = { .object_id = "free_heap", .name = "Free heap", .icon = "mdi:memory" },
+    .common = { .object_id = "free_heap", .name = "Free heap", .icon = "mdi:memory",
+                .entity_category = HaEntityCategory::Diagnostic },
     .unit_of_measurement = "B",
     .device_class = "data_size",
     .state_class = "measurement"
@@ -142,6 +218,52 @@ void addEntities() {
     .common = { .object_id = "ping", .name = "Ping", .icon = "mdi:gesture-tap-button" }
   };
   ha.publishButtonDiscovery(ping);
+
+  HaNumberConfig interval{
+    .common = { .object_id = "interval", .name = "Report interval", .icon = "mdi:timer-cog-outline",
+                .entity_category = HaEntityCategory::Config },
+    .min = 5, .max = 60, .step = 5,
+    .mode = HaNumberMode::Slider,
+    .unit_of_measurement = "s"
+  };
+  ha.publishNumberDiscovery(interval);
+
+  HaSelectConfig mode{
+    .common = { .object_id = "mode", .name = "Mode", .icon = "mdi:tune" },
+    .options = {"Eco", "Normal", "Turbo"}
+  };
+  ha.publishSelectDiscovery(mode);
+
+  HaTextConfig message{
+    .common = { .object_id = "message", .name = "Message", .icon = "mdi:message-text" },
+    .max_length = 32
+  };
+  ha.publishTextDiscovery(message);
+
+  HaLightConfig led{
+    .common = { .object_id = "led", .name = "LED" },
+#ifdef ESP8266
+    .color_mode = HaLightColorMode::Brightness
+#else
+    .color_mode = HaLightColorMode::Rgb
+#endif
+  };
+  ha.publishLightDiscovery(led);
+
+  HaCoverConfig blind{
+    .common = { .object_id = "blind", .name = "Blind" },
+    .device_class = "blind",
+    .has_position = true
+  };
+  ha.publishCoverDiscovery(blind);
+}
+
+void publishSettings() {
+  ha.publishStateNumber("interval", reportIntervalMs / 1000.0, 0);
+  ha.publishState("mode", "Normal");
+  ha.publishState("message", "Hello");
+  publishLight();
+  publishCover();
 }
 
 void publishSensors() {
@@ -192,6 +314,7 @@ void handleSerial() {
     } else if (cmd == "readd") {
       addEntities();
       publishSensors();
+      publishSettings();
     } else if (cmd == "removedevice") {
       logger.info("removeDevice() = %d", ha.removeDevice());
     } else if (cmd == "republish") {
@@ -210,6 +333,9 @@ void handleSerial() {
       publishAlt("online");
     } else if (cmd == "alt offline") {
       publishAlt("offline");
+    } else if (cmd == "pause") {
+      sensorsPaused = !sensorsPaused;
+      logger.info("Sensor updates %s", sensorsPaused ? "paused" : "resumed");
     } else if (cmd == "restart") {
       ESP.restart();
     } else {
@@ -230,6 +356,10 @@ void setup() {
   logger.info("JBHaMqttDiscovery hardware test, transport %s", kTransportName);
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+#ifdef ESP8266
+  pinMode(LED_BUILTIN, OUTPUT);
+#endif
+  applyLed();
 
   WiFi.mode(WIFI_STA);
 
@@ -302,6 +432,7 @@ void setup() {
 
   addEntities();
   publishSensors();
+  publishSettings();
 }
 
 void loop() {
@@ -331,8 +462,19 @@ void loop() {
   }
 
   static unsigned long lastPublish = 0;
-  if (millis() - lastPublish > 10000) {
+  if (millis() - lastPublish > reportIntervalMs) {
     lastPublish = millis();
-    publishSensors();
+    if (!sensorsPaused) {
+      publishSensors();
+    }
+  }
+
+  if (coverPosition != coverTarget && millis() - lastCoverStep > 1000) {
+    lastCoverStep = millis();
+    coverPosition += coverTarget > coverPosition ? 10 : -10;
+    if ((coverTarget - coverPosition) * (coverTarget > coverPosition ? 1 : -1) < 0) {
+      coverPosition = coverTarget;
+    }
+    publishCover();
   }
 }

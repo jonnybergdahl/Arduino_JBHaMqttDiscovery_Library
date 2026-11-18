@@ -78,6 +78,15 @@ struct HaDeviceInfo {
 };
 
 /**
+ * @brief Entity category, which decides where Home Assistant shows an entity.
+ */
+enum class HaEntityCategory : uint8_t {
+  None,        ///< A normal entity (default)
+  Config,      ///< A setting that changes the device, shown under "Configuration". Not for sensors.
+  Diagnostic   ///< Read-only device info (e.g. RSSI, uptime), shown under "Diagnostic"
+};
+
+/**
  * @brief Common options shared by multiple entity types.
  */
 struct HaEntityCommon {
@@ -131,6 +140,14 @@ struct HaEntityCommon {
    * The name field is ignored when this is true.
    */
   bool use_device_name = false;
+
+  /**
+   * @brief Where Home Assistant shows the entity (sent as `ent_cat`).
+   *
+   * Home Assistant doesn't allow `Config` on read-only entities (sensor, binary_sensor);
+   * the library leaves it out there and logs a warning.
+   */
+  HaEntityCategory entity_category = HaEntityCategory::None;
 };
 
 /**
@@ -147,6 +164,12 @@ struct HaSensorConfig {
 
   /** @brief Optional state_class (e.g. "measurement"). */
   const char* state_class = nullptr;
+
+  /**
+   * @brief Seconds without a state update before Home Assistant shows the sensor as
+   * unavailable (sent as `exp_aft`). 0 = never expires.
+   */
+  uint32_t expire_after = 0;
 };
 
 /**
@@ -184,6 +207,12 @@ struct HaBinarySensorConfig {
 
   /** @brief Optional payload representing OFF state (default "OFF" if nullptr). */
   const char* payload_off = nullptr;
+
+  /**
+   * @brief Seconds without a state update before Home Assistant shows the sensor as
+   * unavailable (sent as `exp_aft`). 0 = never expires.
+   */
+  uint32_t expire_after = 0;
 };
 
 /**
@@ -210,7 +239,197 @@ struct HaButtonConfig {
 };
 
 /**
- * @brief Handler for commands sent by Home Assistant to a switch or button.
+ * @brief How Home Assistant shows a number entity.
+ */
+enum class HaNumberMode : uint8_t {
+  Auto,    ///< Home Assistant decides (default)
+  Box,     ///< An input box
+  Slider   ///< A slider
+};
+
+/**
+ * @brief Configuration for a Home Assistant MQTT Discovery number.
+ *
+ * A number is a value that can be set from Home Assistant. The new value arrives in the
+ * onCommand() handler as text (e.g. "21.5"); publish it back with publishStateNumber().
+ */
+struct HaNumberConfig {
+  HaEntityCommon common;
+
+  /** @brief Optional override for command_topic (default `<base>/<node_id>/<object_id>/set`). */
+  const char* command_topic_override = nullptr;
+
+  /** @brief Lowest value (default 1, as in Home Assistant). */
+  float min = 1;
+
+  /** @brief Highest value (default 100, as in Home Assistant). */
+  float max = 100;
+
+  /** @brief Step size (default 1). */
+  float step = 1;
+
+  /** @brief How Home Assistant shows it (default Auto). */
+  HaNumberMode mode = HaNumberMode::Auto;
+
+  /** @brief Optional unit of measurement (e.g. "s"). */
+  const char* unit_of_measurement = nullptr;
+
+  /** @brief Optional device_class (e.g. "temperature"). */
+  const char* device_class = nullptr;
+};
+
+/**
+ * @brief Configuration for a Home Assistant MQTT Discovery select.
+ *
+ * A select is a choice from a fixed list of options. The chosen option arrives in the
+ * onCommand() handler; publish it back with publishState().
+ */
+struct HaSelectConfig {
+  HaEntityCommon common;
+
+  /** @brief Optional override for command_topic (default `<base>/<node_id>/<object_id>/set`). */
+  const char* command_topic_override = nullptr;
+
+  /** @brief The options, e.g. `{"Eco", "Normal", "Turbo"}` (required, at least one). */
+  std::vector<const char*> options;
+};
+
+/**
+ * @brief How Home Assistant shows a text entity.
+ */
+enum class HaTextMode : uint8_t {
+  Text,     ///< Plain text (default)
+  Password  ///< Hidden input
+};
+
+/**
+ * @brief Configuration for a Home Assistant MQTT Discovery text.
+ *
+ * A text is a string that can be set from Home Assistant. The new text arrives in the
+ * onCommand() handler; publish it back with publishState().
+ */
+struct HaTextConfig {
+  HaEntityCommon common;
+
+  /** @brief Optional override for command_topic (default `<base>/<node_id>/<object_id>/set`). */
+  const char* command_topic_override = nullptr;
+
+  /** @brief Shortest allowed length (default 0). */
+  uint16_t min_length = 0;
+
+  /** @brief Longest allowed length (default 255, the Home Assistant maximum). */
+  uint16_t max_length = 255;
+
+  /** @brief How Home Assistant shows it (default Text). */
+  HaTextMode mode = HaTextMode::Text;
+
+  /** @brief Optional regular expression the text must match. */
+  const char* pattern = nullptr;
+};
+
+/**
+ * @brief What a light supports.
+ */
+enum class HaLightColorMode : uint8_t {
+  OnOff,       ///< On and off only
+  Brightness,  ///< On, off and brightness (default)
+  ColorTemp,   ///< Brightness and color temperature (in kelvin)
+  Rgb          ///< Brightness and RGB color
+};
+
+/**
+ * @brief Configuration for a Home Assistant MQTT Discovery light.
+ *
+ * Uses Home Assistant's JSON schema: commands arrive in the onCommand() handler as JSON,
+ * e.g. `{"state":"ON","brightness":128}`. Decode them with HaDiscovery::parseLightCommand()
+ * and report the state with HaDiscovery::publishStateLight().
+ */
+struct HaLightConfig {
+  HaEntityCommon common;
+
+  /** @brief Optional override for command_topic (default `<base>/<node_id>/<object_id>/set`). */
+  const char* command_topic_override = nullptr;
+
+  /** @brief What the light supports (default Brightness). */
+  HaLightColorMode color_mode = HaLightColorMode::Brightness;
+
+  /** @brief Brightness for full brightness (default 255). */
+  uint16_t brightness_scale = 255;
+
+  /** @brief Warmest color temperature in kelvin, for ColorTemp (default 2000). */
+  uint16_t min_kelvin = 2000;
+
+  /** @brief Coldest color temperature in kelvin, for ColorTemp (default 6500). */
+  uint16_t max_kelvin = 6500;
+};
+
+/**
+ * @brief A light command from Home Assistant, decoded by HaDiscovery::parseLightCommand().
+ *
+ * Only the parts Home Assistant sent are set; check the has_* flags.
+ */
+struct HaLightCommand {
+  bool has_state = false;        ///< state was sent
+  bool on = false;               ///< true for "ON"
+  bool has_brightness = false;   ///< brightness was sent
+  uint16_t brightness = 0;       ///< 0..brightness_scale
+  bool has_color_temp = false;   ///< color_temp was sent
+  uint16_t color_temp_kelvin = 0;
+  bool has_color = false;        ///< color was sent
+  uint8_t r = 0, g = 0, b = 0;
+  bool has_transition = false;   ///< transition was sent
+  float transition = 0;          ///< seconds
+};
+
+/**
+ * @brief The state of a light, for HaDiscovery::publishStateLight().
+ */
+struct HaLightState {
+  bool on = false;
+  /** @brief Brightness (0..brightness_scale), or -1 to leave it out. */
+  int brightness = -1;
+  /** @brief Color temperature in kelvin, or -1 to leave it out. */
+  int color_temp_kelvin = -1;
+  /** @brief RGB color, or -1 in r to leave it out. */
+  int r = -1, g = 0, b = 0;
+};
+
+/**
+ * @brief Configuration for a Home Assistant MQTT Discovery cover (blinds, garage door, ...).
+ *
+ * Open, close and stop commands arrive in the onCommand() handler as payload_open,
+ * payload_close and payload_stop. If has_position is set, a position request arrives as
+ * a number ("0".."100", 0 = closed). Report the state ("open", "opening", "closed",
+ * "closing", "stopped") with publishState() and the position with publishStatePosition().
+ */
+struct HaCoverConfig {
+  HaEntityCommon common;
+
+  /** @brief Optional override for command_topic (default `<base>/<node_id>/<object_id>/set`). */
+  const char* command_topic_override = nullptr;
+
+  /** @brief Optional device_class (e.g. "blind", "garage", "shutter"). */
+  const char* device_class = nullptr;
+
+  /** @brief Payload for open (default "OPEN"). */
+  const char* payload_open = nullptr;
+
+  /** @brief Payload for close (default "CLOSE"). */
+  const char* payload_close = nullptr;
+
+  /** @brief Payload for stop (default "STOP"), or "" if the cover can't stop. */
+  const char* payload_stop = nullptr;
+
+  /**
+   * @brief Whether the cover reports and accepts a position (0..100).
+   *
+   * Adds `<base>/<node_id>/<object_id>/position` (state) and `.../set_position` (command).
+   */
+  bool has_position = false;
+};
+
+/**
+ * @brief Handler for commands sent by Home Assistant (switch, button, number, select, text, light, cover).
  *
  * @param object_id The entity's object_id
  * @param payload   The command payload, null-terminated (e.g. "ON", "OFF", "PRESS")
@@ -274,9 +493,10 @@ public:
   /**
    * @brief Set the handler for commands from Home Assistant.
    *
-   * It's called when a message arrives on the command topic of a switch or button
-   * added with publishSwitchDiscovery() or publishButtonDiscovery().
-   * For a switch, publish the new state with publishStateSwitch() after acting on it.
+   * It's called when a message arrives on the command topic of an entity that takes
+   * commands: switch, button, number, select, text, light or cover. After acting on it,
+   * publish the new state (publishStateSwitch(), publishStateNumber(), publishStateLight(),
+   * publishState() or publishStatePosition()).
    *
    * Commands are queued when they arrive and the handler is called from tick(), so it
    * always runs in loop(), also with AsyncMqttClient.
@@ -379,11 +599,52 @@ public:
   bool publishButtonDiscovery(const HaButtonConfig& cfg);
 
   /**
+   * @brief Add or update a number. The device payload is published from the next tick().
+   *
+   * New values are passed to the onCommand() handler as text.
+   *
+   * @return false if setDevice() wasn't called, object_id is missing, or min > max
+   */
+  bool publishNumberDiscovery(const HaNumberConfig& cfg);
+
+  /**
+   * @brief Add or update a select. The device payload is published from the next tick().
+   *
+   * The chosen option is passed to the onCommand() handler.
+   *
+   * @return false if setDevice() wasn't called, object_id is missing, or there are no options
+   */
+  bool publishSelectDiscovery(const HaSelectConfig& cfg);
+
+  /**
+   * @brief Add or update a text. The device payload is published from the next tick().
+   *
+   * The new text is passed to the onCommand() handler.
+   *
+   * @return false if setDevice() wasn't called, object_id is missing, or min_length > max_length
+   */
+  bool publishTextDiscovery(const HaTextConfig& cfg);
+
+  /**
+   * @brief Add or update a light (JSON schema). The device payload is published from the next tick().
+   *
+   * Commands are passed to the onCommand() handler as JSON; see parseLightCommand().
+   */
+  bool publishLightDiscovery(const HaLightConfig& cfg);
+
+  /**
+   * @brief Add or update a cover. The device payload is published from the next tick().
+   *
+   * Open/close/stop and position commands are passed to the onCommand() handler.
+   */
+  bool publishCoverDiscovery(const HaCoverConfig& cfg);
+
+  /**
    * @brief Remove one entity from the device.
    *
    * From the next tick(), the device payload is published twice: once with the entity
    * as a removal stub (`{"p": "<component>"}`), then without it. Commands for a removed
-   * switch or button are no longer passed to the command handler, and its stored state
+   * entity are no longer passed to the command handler, and its stored state
    * is dropped. Removing the last entity also clears the device discovery topic.
    *
    * @param component Component name (e.g. "sensor", "switch")
@@ -427,6 +688,37 @@ public:
    * @return true if publish was accepted by transport, false otherwise
    */
   bool publishStateSwitch(const char* object_id, bool on, bool retained = false, uint8_t qos = 0);
+
+  /**
+   * @brief Publish a number state, e.g. 21.5 with decimals = 1 -> "21.5".
+   *
+   * @param object_id Entity object_id
+   * @param value     The value
+   * @param decimals  Digits after the decimal point (default 2)
+   */
+  bool publishStateNumber(const char* object_id, double value, uint8_t decimals = 2, bool retained = false, uint8_t qos = 0);
+
+  /**
+   * @brief Publish a light state as JSON, e.g. `{"state":"ON","brightness":128,"color_mode":"brightness"}`.
+   *
+   * The color_mode is set from what's included: color, then color temperature, then
+   * brightness, otherwise onoff.
+   */
+  bool publishStateLight(const char* object_id, const HaLightState& state, bool retained = false, uint8_t qos = 0);
+
+  /**
+   * @brief Publish a cover position (0..100) to `<base>/<node_id>/<object_id>/position`.
+   */
+  bool publishStatePosition(const char* object_id, int position, bool retained = false, uint8_t qos = 0);
+
+  /**
+   * @brief Decode a light command from the onCommand() handler.
+   *
+   * @param payload The JSON payload, e.g. `{"state":"ON","brightness":128}`
+   * @param out     The decoded command; only the parts that were sent are set
+   * @return false if the payload isn't valid JSON
+   */
+  static bool parseLightCommand(const char* payload, HaLightCommand& out);
 
   // Convenience overloads for std::string parameters
 
@@ -526,6 +818,9 @@ private:
   void handleMessage(const IncomingMessage& msg);
 
   void registerCommandTopic(const std::string& topic, const char* object_id);
+  void setCommandTopics(const char* object_id, const std::vector<std::string>& topics);
+  std::string commandTopicFor(const char* override_topic, const char* object_id) const;
+  bool publishToTopic(const std::string& topic, const char* payload, bool retained, uint8_t qos);
   void unregisterCommandTopics(const char* object_id);
   void subscribeAll();
 
@@ -546,6 +841,12 @@ private:
   std::string buildSwitchConfigJson(const HaSwitchConfig& cfg) const;
   std::string buildBinarySensorConfigJson(const HaBinarySensorConfig& cfg) const;
   std::string buildButtonConfigJson(const HaButtonConfig& cfg) const;
+  std::string buildNumberConfigJson(const HaNumberConfig& cfg) const;
+  std::string buildSelectConfigJson(const HaSelectConfig& cfg) const;
+  std::string buildTextConfigJson(const HaTextConfig& cfg) const;
+  std::string buildLightConfigJson(const HaLightConfig& cfg) const;
+  std::string buildCoverConfigJson(const HaCoverConfig& cfg) const;
+  bool addEntity(const char* component, const HaEntityCommon& common, std::string json);
 
   void addCommonFields(JsonDocument& doc, const char* component, const HaEntityCommon& common) const;
   std::string stateTopicFor(const HaEntityCommon& common) const;

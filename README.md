@@ -169,10 +169,12 @@ So you can publish them in `setup()` right after `connect()`, even with AsyncMqt
 Call `ha.republishAll()` to send everything again yourself.
 
 > Each entity is kept in RAM (about 150–250 bytes each).
+> With PubSubClient the transport's buffer also grows to fit the whole device payload (about 3.7 KB for 14 entities).
+> On an ESP8266 that's about 6 KB of heap for 14 entities; keep an eye on free heap if you add many more.
 
 ## Commands from Home Assistant
 
-Switches and buttons get a command topic (`<base>/<node_id>/<object_id>/set` by default).
+Switches, buttons, numbers, selects, texts, lights and covers get a command topic (`<base>/<node_id>/<object_id>/set` by default; covers with a position also get `.../set_position`).
 The library subscribes to it, again after every reconnect, and passes incoming commands to one handler:
 
 ```c++
@@ -232,6 +234,23 @@ HaSensorConfig temp{
   .common = { .object_id="temperature", .name="Temperature", .entity_id="office_temperature" },
   .unit_of_measurement="°C",
   .device_class="temperature"
+};
+```
+
+## Entity category and expiry
+
+- `.entity_category = HaEntityCategory::Diagnostic` shows read-only device info (signal strength, uptime, free memory) under **Diagnostic** on the device page instead of with the main controls.
+- `.entity_category = HaEntityCategory::Config` shows a setting under **Configuration**. Home Assistant doesn't allow it on sensors and binary sensors, so the library leaves it out there and logs a warning.
+- `.expire_after = 300` (sensors and binary sensors) makes Home Assistant show the entity as unavailable if no new state arrives within 300 seconds.
+
+> Home Assistant only picks up a changed `entity_category` on an existing entity when it creates the entity again, after a restart or a reload of the MQTT integration.
+
+```c++
+HaSensorConfig rssi{
+  .common = { .object_id="rssi", .name="Wi-Fi signal", .entity_category=HaEntityCategory::Diagnostic },
+  .unit_of_measurement="dBm",
+  .device_class="signal_strength",
+  .expire_after=120
 };
 ```
 
@@ -299,6 +318,104 @@ ha.publishButtonDiscovery(restart);
 
 // Presses arrive in the onCommand() handler with the "PRESS" payload.
 ```
+
+
+### Number
+
+A value that can be set from Home Assistant, shown as a slider or an input box.
+
+```c++
+HaNumberConfig interval{
+  .common = { .object_id="interval", .name="Report interval", .entity_category=HaEntityCategory::Config },
+  .min=5, .max=300, .step=5,
+  .mode=HaNumberMode::Slider,
+  .unit_of_measurement="s"
+};
+ha.publishNumberDiscovery(interval);
+
+// The new value arrives in onCommand() as text, e.g. "60". Report it back:
+ha.publishStateNumber("interval", 60, 0);
+```
+
+### Select
+
+A choice from a fixed list.
+
+```c++
+HaSelectConfig mode{
+  .common = { .object_id="mode", .name="Mode" },
+  .options = {"Eco", "Normal", "Turbo"}
+};
+ha.publishSelectDiscovery(mode);
+
+// The chosen option arrives in onCommand(), e.g. "Eco". Report it back:
+ha.publishState("mode", "Eco");
+```
+
+### Text
+
+A string that can be set from Home Assistant.
+
+```c++
+HaTextConfig message{
+  .common = { .object_id="message", .name="Display text" },
+  .max_length=32
+};
+ha.publishTextDiscovery(message);
+
+// The new text arrives in onCommand(). Report it back:
+ha.publishState("message", "Hello");
+```
+
+### Light
+
+Uses Home Assistant's JSON schema, so all light commands arrive on one topic as JSON.
+`color_mode` is `OnOff`, `Brightness` (default), `ColorTemp` (kelvin) or `Rgb`.
+
+```c++
+HaLightConfig lamp{
+  .common = { .object_id="lamp", .name="Lamp" },
+  .color_mode=HaLightColorMode::Rgb
+};
+ha.publishLightDiscovery(lamp);
+
+void onCommand(const char* objectId, const char* payload) {
+  if (strcmp(objectId, "lamp") == 0) {
+    HaLightCommand cmd;
+    if (HaDiscovery::parseLightCommand(payload, cmd)) {
+      if (cmd.has_state) lampOn = cmd.on;
+      if (cmd.has_brightness) lampBrightness = cmd.brightness;
+      if (cmd.has_color) { lampR = cmd.r; lampG = cmd.g; lampB = cmd.b; }
+      // ... drive the LEDs, then report the state:
+      HaLightState st;
+      st.on = lampOn;
+      st.brightness = lampBrightness;
+      st.r = lampR; st.g = lampG; st.b = lampB;
+      ha.publishStateLight("lamp", st);
+    }
+  }
+}
+```
+
+### Cover
+
+Blinds, shutters, garage doors and so on.
+
+```c++
+HaCoverConfig blind{
+  .common = { .object_id="blind", .name="Blind" },
+  .device_class="blind",
+  .has_position=true
+};
+ha.publishCoverDiscovery(blind);
+
+// onCommand() gets "OPEN", "CLOSE" or "STOP", or a position "0".."100" (0 = closed).
+// Report the state ("open", "opening", "closed", "closing" or "stopped") and position:
+ha.publishState("blind", "opening");
+ha.publishStatePosition("blind", 40);
+```
+
+Set `.payload_stop = ""` for a cover that can't stop.
 
 ## Removing entities
 

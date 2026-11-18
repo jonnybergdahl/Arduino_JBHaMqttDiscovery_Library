@@ -752,6 +752,349 @@ void test_remove_device_while_disconnected(void) {
     TEST_ASSERT_TRUE(msgs[0].payload.empty());
 }
 
+
+// ---------------------------------------------------------------------------
+// entity_category, expire_after
+// ---------------------------------------------------------------------------
+
+void test_entity_category(void) {
+    HaSensorConfig rssi;
+    rssi.common.object_id = "rssi";
+    rssi.common.entity_category = HaEntityCategory::Diagnostic;
+    discovery->publishSensorDiscovery(rssi);
+
+    HaSensorConfig bad;
+    bad.common.object_id = "bad";
+    bad.common.entity_category = HaEntityCategory::Config;  // not allowed on a sensor
+    discovery->publishSensorDiscovery(bad);
+
+    HaNumberConfig interval;
+    interval.common.object_id = "interval";
+    interval.common.entity_category = HaEntityCategory::Config;
+    discovery->publishNumberDiscovery(interval);
+
+    addSensor("plain");
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject cmps = doc["cmps"];
+    TEST_ASSERT_EQUAL_STRING("diagnostic", cmps["rssi"]["ent_cat"]);
+    TEST_ASSERT_FALSE(cmps["bad"]["ent_cat"].is<const char*>());
+    TEST_ASSERT_EQUAL_STRING("config", cmps["interval"]["ent_cat"]);
+    TEST_ASSERT_FALSE(cmps["plain"]["ent_cat"].is<const char*>());
+}
+
+void test_expire_after(void) {
+    HaSensorConfig s1;
+    s1.common.object_id = "temp";
+    s1.expire_after = 300;
+    discovery->publishSensorDiscovery(s1);
+
+    HaBinarySensorConfig b1;
+    b1.common.object_id = "motion";
+    b1.expire_after = 60;
+    discovery->publishBinarySensorDiscovery(b1);
+
+    addSensor("plain");
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject cmps = doc["cmps"];
+    TEST_ASSERT_EQUAL(300, cmps["temp"]["exp_aft"].as<int>());
+    TEST_ASSERT_EQUAL(60, cmps["motion"]["exp_aft"].as<int>());
+    TEST_ASSERT_FALSE(cmps["plain"]["exp_aft"].is<int>());
+}
+
+// ---------------------------------------------------------------------------
+// number, select, text
+// ---------------------------------------------------------------------------
+
+void test_number_component_and_command(void) {
+    discovery->onCommand(recordCommand);
+    HaNumberConfig cfg;
+    cfg.common.object_id = "interval";
+    cfg.min = 5;
+    cfg.max = 60;
+    cfg.step = 0.5f;
+    cfg.mode = HaNumberMode::Slider;
+    cfg.unit_of_measurement = "s";
+    TEST_ASSERT_TRUE(discovery->publishNumberDiscovery(cfg));
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject c = doc["cmps"]["interval"];
+    TEST_ASSERT_EQUAL_STRING("number", c["p"]);
+    TEST_ASSERT_EQUAL_FLOAT(5, c["min"].as<float>());
+    TEST_ASSERT_EQUAL_FLOAT(60, c["max"].as<float>());
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, c["step"].as<float>());
+    TEST_ASSERT_EQUAL_STRING("slider", c["mode"]);
+    TEST_ASSERT_EQUAL_STRING("s", c["unit_of_meas"]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/interval/set", c["cmd_t"]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/interval/state", c["stat_t"]);
+
+    transport.deliver("devices/test_node/interval/set", "12.5");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, commands.size());
+    TEST_ASSERT_EQUAL_STRING("12.5", commands[0].second.c_str());
+
+    transport.clear();
+    discovery->publishStateNumber("interval", 12.5, 1);
+    TEST_ASSERT_EQUAL_STRING("12.5", transport.messages[0].payload.c_str());
+    transport.clear();
+    discovery->publishStateNumber("interval", 7, 0);
+    TEST_ASSERT_EQUAL_STRING("7", transport.messages[0].payload.c_str());
+}
+
+void test_number_rejects_bad_range(void) {
+    HaNumberConfig cfg;
+    cfg.common.object_id = "bad";
+    cfg.min = 10;
+    cfg.max = 5;
+    TEST_ASSERT_FALSE(discovery->publishNumberDiscovery(cfg));
+    cfg.min = 0;
+    cfg.step = 0;
+    TEST_ASSERT_FALSE(discovery->publishNumberDiscovery(cfg));
+}
+
+void test_select_component(void) {
+    discovery->onCommand(recordCommand);
+    HaSelectConfig cfg;
+    cfg.common.object_id = "mode";
+    cfg.options = {"Eco", "Normal", "Turbo"};
+    TEST_ASSERT_TRUE(discovery->publishSelectDiscovery(cfg));
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject c = doc["cmps"]["mode"];
+    TEST_ASSERT_EQUAL_STRING("select", c["p"]);
+    TEST_ASSERT_EQUAL(3, c["ops"].as<JsonArray>().size());
+    TEST_ASSERT_EQUAL_STRING("Turbo", c["ops"][2]);
+
+    transport.deliver("devices/test_node/mode/set", "Eco");
+    discovery->tick();
+    TEST_ASSERT_EQUAL_STRING("Eco", commands[0].second.c_str());
+
+    HaSelectConfig empty;
+    empty.common.object_id = "empty";
+    TEST_ASSERT_FALSE(discovery->publishSelectDiscovery(empty));
+}
+
+void test_text_component(void) {
+    HaTextConfig cfg;
+    cfg.common.object_id = "message";
+    cfg.max_length = 32;
+    cfg.mode = HaTextMode::Password;
+    cfg.pattern = "[a-z]*";
+    TEST_ASSERT_TRUE(discovery->publishTextDiscovery(cfg));
+
+    HaTextConfig plain;
+    plain.common.object_id = "plain";
+    discovery->publishTextDiscovery(plain);
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject c = doc["cmps"]["message"];
+    TEST_ASSERT_EQUAL_STRING("text", c["p"]);
+    TEST_ASSERT_EQUAL(32, c["max"].as<int>());
+    TEST_ASSERT_EQUAL_STRING("password", c["mode"]);
+    TEST_ASSERT_EQUAL_STRING("[a-z]*", c["ptrn"]);
+    JsonObject p = doc["cmps"]["plain"];
+    TEST_ASSERT_FALSE(p["min"].is<int>());
+    TEST_ASSERT_FALSE(p["max"].is<int>());
+    TEST_ASSERT_FALSE(p["mode"].is<const char*>());
+
+    HaTextConfig bad;
+    bad.common.object_id = "bad";
+    bad.min_length = 10;
+    bad.max_length = 5;
+    TEST_ASSERT_FALSE(discovery->publishTextDiscovery(bad));
+}
+
+// ---------------------------------------------------------------------------
+// light
+// ---------------------------------------------------------------------------
+
+void test_light_components(void) {
+    HaLightConfig rgb;
+    rgb.common.object_id = "rgb";
+    rgb.color_mode = HaLightColorMode::Rgb;
+    discovery->publishLightDiscovery(rgb);
+
+    HaLightConfig ct;
+    ct.common.object_id = "ct";
+    ct.color_mode = HaLightColorMode::ColorTemp;
+    ct.min_kelvin = 2700;
+    ct.max_kelvin = 6000;
+    ct.brightness_scale = 100;
+    discovery->publishLightDiscovery(ct);
+
+    HaLightConfig onoff;
+    onoff.common.object_id = "onoff";
+    onoff.color_mode = HaLightColorMode::OnOff;
+    discovery->publishLightDiscovery(onoff);
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject cmps = doc["cmps"];
+    TEST_ASSERT_EQUAL_STRING("light", cmps["rgb"]["p"]);
+    TEST_ASSERT_EQUAL_STRING("json", cmps["rgb"]["schema"]);
+    TEST_ASSERT_EQUAL_STRING("rgb", cmps["rgb"]["supported_color_modes"][0]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/rgb/set", cmps["rgb"]["cmd_t"]);
+    TEST_ASSERT_FALSE(cmps["rgb"]["brightness_scale"].is<int>());
+
+    TEST_ASSERT_EQUAL_STRING("color_temp", cmps["ct"]["supported_color_modes"][0]);
+    TEST_ASSERT_TRUE(cmps["ct"]["color_temp_kelvin"].as<bool>());
+    TEST_ASSERT_EQUAL(2700, cmps["ct"]["min_kelvin"].as<int>());
+    TEST_ASSERT_EQUAL(6000, cmps["ct"]["max_kelvin"].as<int>());
+    TEST_ASSERT_EQUAL(100, cmps["ct"]["brightness_scale"].as<int>());
+
+    TEST_ASSERT_EQUAL_STRING("onoff", cmps["onoff"]["supported_color_modes"][0]);
+}
+
+void test_parse_light_command(void) {
+    HaLightCommand cmd;
+    TEST_ASSERT_TRUE(HaDiscovery::parseLightCommand(
+        "{\"state\":\"ON\",\"brightness\":128,\"color\":{\"r\":255,\"g\":10,\"b\":0},\"transition\":2.5}", cmd));
+    TEST_ASSERT_TRUE(cmd.has_state);
+    TEST_ASSERT_TRUE(cmd.on);
+    TEST_ASSERT_TRUE(cmd.has_brightness);
+    TEST_ASSERT_EQUAL(128, cmd.brightness);
+    TEST_ASSERT_TRUE(cmd.has_color);
+    TEST_ASSERT_EQUAL(255, cmd.r);
+    TEST_ASSERT_EQUAL(10, cmd.g);
+    TEST_ASSERT_TRUE(cmd.has_transition);
+    TEST_ASSERT_EQUAL_FLOAT(2.5f, cmd.transition);
+    TEST_ASSERT_FALSE(cmd.has_color_temp);
+
+    TEST_ASSERT_TRUE(HaDiscovery::parseLightCommand("{\"state\":\"OFF\"}", cmd));
+    TEST_ASSERT_TRUE(cmd.has_state);
+    TEST_ASSERT_FALSE(cmd.on);
+    TEST_ASSERT_FALSE(cmd.has_brightness);
+
+    TEST_ASSERT_TRUE(HaDiscovery::parseLightCommand("{\"color_temp\":3000}", cmd));
+    TEST_ASSERT_FALSE(cmd.has_state);
+    TEST_ASSERT_TRUE(cmd.has_color_temp);
+    TEST_ASSERT_EQUAL(3000, cmd.color_temp_kelvin);
+
+    TEST_ASSERT_FALSE(HaDiscovery::parseLightCommand("ON", cmd));
+    TEST_ASSERT_FALSE(HaDiscovery::parseLightCommand(nullptr, cmd));
+}
+
+void test_publish_state_light(void) {
+    JsonDocument doc;
+    HaLightState st;
+    st.on = true;
+    st.brightness = 200;
+    discovery->publishStateLight("lamp", st);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/lamp/state", transport.messages[0].topic.c_str());
+    deserializeJson(doc, transport.messages[0].payload);
+    TEST_ASSERT_EQUAL_STRING("ON", doc["state"]);
+    TEST_ASSERT_EQUAL(200, doc["brightness"].as<int>());
+    TEST_ASSERT_EQUAL_STRING("brightness", doc["color_mode"]);
+
+    st.r = 1; st.g = 2; st.b = 3;
+    discovery->publishStateLight("lamp", st);
+    deserializeJson(doc, transport.messages[1].payload);
+    TEST_ASSERT_EQUAL_STRING("rgb", doc["color_mode"]);
+    TEST_ASSERT_EQUAL(3, doc["color"]["b"].as<int>());
+
+    HaLightState ct;
+    ct.on = true;
+    ct.color_temp_kelvin = 4000;
+    discovery->publishStateLight("lamp", ct);
+    deserializeJson(doc, transport.messages[2].payload);
+    TEST_ASSERT_EQUAL_STRING("color_temp", doc["color_mode"]);
+    TEST_ASSERT_EQUAL(4000, doc["color_temp"].as<int>());
+
+    HaLightState off;
+    discovery->publishStateLight("lamp", off);
+    deserializeJson(doc, transport.messages[3].payload);
+    TEST_ASSERT_EQUAL_STRING("OFF", doc["state"]);
+    TEST_ASSERT_EQUAL_STRING("onoff", doc["color_mode"]);
+}
+
+// ---------------------------------------------------------------------------
+// cover
+// ---------------------------------------------------------------------------
+
+void test_cover_component_and_commands(void) {
+    discovery->onCommand(recordCommand);
+    HaCoverConfig cfg;
+    cfg.common.object_id = "blind";
+    cfg.device_class = "blind";
+    cfg.has_position = true;
+    TEST_ASSERT_TRUE(discovery->publishCoverDiscovery(cfg));
+
+    HaCoverConfig door;
+    door.common.object_id = "door";
+    door.payload_stop = "";  // can't stop
+    discovery->publishCoverDiscovery(door);
+    discovery->tick();
+
+    JsonDocument doc = lastDevicePayload();
+    JsonObject c = doc["cmps"]["blind"];
+    TEST_ASSERT_EQUAL_STRING("cover", c["p"]);
+    TEST_ASSERT_EQUAL_STRING("blind", c["dev_cla"]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/blind/set", c["cmd_t"]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/blind/position", c["pos_t"]);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/blind/set_position", c["set_pos_t"]);
+    TEST_ASSERT_TRUE(doc["cmps"]["door"]["pl_stop"].isNull());
+    TEST_ASSERT_FALSE(doc["cmps"]["door"]["pos_t"].is<const char*>());
+
+    transport.deliver("devices/test_node/blind/set", "OPEN");
+    transport.deliver("devices/test_node/blind/set_position", "40");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(2, commands.size());
+    TEST_ASSERT_EQUAL_STRING("blind", commands[0].first.c_str());
+    TEST_ASSERT_EQUAL_STRING("OPEN", commands[0].second.c_str());
+    TEST_ASSERT_EQUAL_STRING("blind", commands[1].first.c_str());
+    TEST_ASSERT_EQUAL_STRING("40", commands[1].second.c_str());
+
+    transport.clear();
+    discovery->publishStatePosition("blind", 140);
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/blind/position", transport.messages[0].topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("100", transport.messages[0].payload.c_str());
+}
+
+void test_cover_removed_drops_both_routes_and_states(void) {
+    discovery->onCommand(recordCommand);
+    HaCoverConfig cfg;
+    cfg.common.object_id = "blind";
+    cfg.has_position = true;
+    discovery->publishCoverDiscovery(cfg);
+    discovery->tick();
+    discovery->publishState("blind", "open");
+    discovery->publishStatePosition("blind", 100);
+
+    discovery->removeEntity("cover", "blind");
+    transport.deliver("devices/test_node/blind/set", "CLOSE");
+    transport.deliver("devices/test_node/blind/set_position", "0");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(0, commands.size());
+
+    transport.clear();
+    transport.fireConnect();
+    discovery->tick();
+    TEST_ASSERT_EQUAL(-1, transport.indexOf("devices/test_node/blind/state"));
+    TEST_ASSERT_EQUAL(-1, transport.indexOf("devices/test_node/blind/position"));
+}
+
+void test_republish_cover_without_position_drops_route(void) {
+    discovery->onCommand(recordCommand);
+    HaCoverConfig cfg;
+    cfg.common.object_id = "blind";
+    cfg.has_position = true;
+    discovery->publishCoverDiscovery(cfg);
+    cfg.has_position = false;
+    discovery->publishCoverDiscovery(cfg);
+
+    transport.deliver("devices/test_node/blind/set_position", "10");
+    transport.deliver("devices/test_node/blind/set", "STOP");
+    discovery->tick();
+    TEST_ASSERT_EQUAL(1, commands.size());
+    TEST_ASSERT_EQUAL_STRING("STOP", commands[0].second.c_str());
+}
+
 // ---------------------------------------------------------------------------
 // Reconnect backoff
 // ---------------------------------------------------------------------------
@@ -838,6 +1181,18 @@ static void runAll() {
     RUN_TEST(test_readd_before_tick_cancels_removal);
     RUN_TEST(test_remove_device);
     RUN_TEST(test_remove_device_while_disconnected);
+    RUN_TEST(test_entity_category);
+    RUN_TEST(test_expire_after);
+    RUN_TEST(test_number_component_and_command);
+    RUN_TEST(test_number_rejects_bad_range);
+    RUN_TEST(test_select_component);
+    RUN_TEST(test_text_component);
+    RUN_TEST(test_light_components);
+    RUN_TEST(test_parse_light_command);
+    RUN_TEST(test_publish_state_light);
+    RUN_TEST(test_cover_component_and_commands);
+    RUN_TEST(test_cover_removed_drops_both_routes_and_states);
+    RUN_TEST(test_republish_cover_without_position_drops_route);
     RUN_TEST(test_reconnect_backoff);
     RUN_TEST(test_reconnect_backoff_wraps);
     RUN_TEST(test_reconnect_now_sets_request_once);
