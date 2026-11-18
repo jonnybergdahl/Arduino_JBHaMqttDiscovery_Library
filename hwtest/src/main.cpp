@@ -12,9 +12,23 @@
 //   wifidrop                   drop Wi-Fi for 15 s
 //   alt online|offline         publish the availability override topic
 //   restart                    ESP.restart()
+//
+// Builds for the TinyS3 (ESP32-S3) and the Wemos D1 mini (ESP8266).
 
 #include <Arduino.h>
+#ifdef ESP8266
+#include <ESP8266WiFi.h>
+static const char* kBoardName = "JBHa Test D1";
+static const char* kManufacturer = "Wemos";
+static const char* kModel = "D1 mini";
+WiFiEventHandler gotIpHandler;
+WiFiEventHandler disconnectedHandler;
+#else
 #include <WiFi.h>
+static const char* kBoardName = "JBHa Test";
+static const char* kManufacturer = "Unexpected Maker";
+static const char* kModel = "TinyS3";
+#endif
 #include <HaDiscovery.h>
 #include <jblogger.h>
 #include "secrets.h"
@@ -84,12 +98,21 @@ void addEntities() {
   ha.publishSensorDiscovery(heap);
 
   // Main feature: shows with just the device name
+#ifdef ESP8266
+  // The ESP8266 has no temperature sensor
+  HaSensorConfig chipTemp{
+    .common = { .object_id = "heap_frag", .icon = "mdi:memory", .use_device_name = true },
+    .unit_of_measurement = "%",
+    .state_class = "measurement"
+  };
+#else
   HaSensorConfig chipTemp{
     .common = { .object_id = "chip_temp", .use_device_name = true },
     .unit_of_measurement = "°C",
     .device_class = "temperature",
     .state_class = "measurement"
   };
+#endif
   ha.publishSensorDiscovery(chipTemp);
 
   HaSensorConfig pingCount{
@@ -125,9 +148,13 @@ void publishSensors() {
   ha.publishState("uptime", std::to_string(millis() / 1000));
   ha.publishState("rssi", std::to_string(WiFi.RSSI()));
   ha.publishState("free_heap", std::to_string(ESP.getFreeHeap()));
+#ifdef ESP8266
+  ha.publishState("heap_frag", std::to_string(ESP.getHeapFragmentation()));
+#else
   char t[16];
   snprintf(t, sizeof(t), "%.1f", temperatureRead());
   ha.publishState("chip_temp", t);
+#endif
   ha.publishState("alt_avail", "42");
 }
 
@@ -193,8 +220,10 @@ void handleSerial() {
 
 void setup() {
   Serial.begin(115200);
+#ifdef ESP32
   // Drop output when no one reads the USB port, instead of blocking loop()
   Serial.setTxTimeoutMs(0);
+#endif
   unsigned long start = millis();
   while (!Serial && millis() - start < 3000) {}
   delay(500);
@@ -217,6 +246,15 @@ void setup() {
   logger.info("Scan found %d networks, %d named %s", n, matches, WIFI_SSID);
 
   // 15/202/204 = wrong password or auth failure, 201 = network not found
+#ifdef ESP8266
+  disconnectedHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) {
+    logger.warning("Wi-Fi disconnected, reason %d", (int)e.reason);
+  });
+  gotIpHandler = WiFi.onStationModeGotIP([](const WiFiEventStationModeGotIP& e) {
+    logger.info("Wi-Fi got IP %s", e.ip.toString().c_str());
+    transport.reconnectNow();
+  });
+#else
   WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
     logger.warning("Wi-Fi disconnected, reason %d", (int)info.wifi_sta_disconnected.reason);
   }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
@@ -224,6 +262,7 @@ void setup() {
     logger.info("Wi-Fi got IP %s", WiFi.localIP().toString().c_str());
     transport.reconnectNow();
   }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+#endif
 
 #ifdef WIFI_LOW_TX_POWER
   // Works around AUTH_EXPIRE (reason 2) on some ESP32-S3 boards
@@ -249,9 +288,9 @@ void setup() {
 
   ha.setDevice({
     .node_id = nodeId.c_str(),
-    .name = "JBHa Test",
-    .manufacturer = "Unexpected Maker",
-    .model = "TinyS3",
+    .name = kBoardName,
+    .manufacturer = kManufacturer,
+    .model = kModel,
     .sw_version = kTransportName,
     .identifiers = mac.c_str(),
     .configuration_url = visitUrl.c_str()
