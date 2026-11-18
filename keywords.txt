@@ -8,8 +8,17 @@ HaButtonConfig	KEYWORD1
 MqttTransport	KEYWORD1
 PubSubClientTransport	KEYWORD1
 AsyncMqttClientTransport	KEYWORD1
+HaCommandCallback	KEYWORD1
 
 setDevice	KEYWORD2
+onCommand	KEYWORD2
+setLogLevel	KEYWORD2
+setServer	KEYWORD2
+connect	KEYWORD2
+subscribe	KEYWORD2
+setWill	KEYWORD2
+setOnMessage	KEYWORD2
+setOnConnect	KEYWORD2
 tick	KEYWORD2
 publishAvailabilityOnline	KEYWORD2
 publishAvailabilityOffline	KEYWORD2

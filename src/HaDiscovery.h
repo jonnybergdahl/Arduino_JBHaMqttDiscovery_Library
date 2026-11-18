@@ -1,7 +1,9 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <functional>
 #include <string>
+#include <vector>
 #include <ArduinoJson.h>
 #include "transport/MqttTransport.h"
 
@@ -14,7 +16,8 @@
  *
  * Key behaviors:
  * - Publishes retained Discovery config messages
- * - Publishes availability ("online"/"offline")
+ * - Publishes availability ("online"/"offline") and sets "offline" as the MQTT Last Will
+ * - Subscribes to switch and button command topics and passes commands to a handler
  * - Provides default topic conventions with per-entity overrides
  * - Supports removal of entities by publishing an empty retained config payload
  *
@@ -156,11 +159,21 @@ struct HaButtonConfig {
 };
 
 /**
+ * @brief Handler for commands sent by Home Assistant to a switch or button.
+ *
+ * @param object_id The entity's object_id
+ * @param payload   The command payload, null-terminated (e.g. "ON", "OFF", "PRESS")
+ */
+using HaCommandCallback = std::function<void(const char* object_id, const char* payload)>;
+
+/**
  * @brief Home Assistant MQTT Discovery publisher (transport-agnostic).
  *
  * Typical usage:
  * - Construct with a MqttTransport implementation
- * - Provide device info via setDevice()
+ * - Provide device info via setDevice(), before connecting (this sets the Last Will)
+ * - Register a command handler with onCommand() if you have switches or buttons
+ * - Connect through the transport
  * - Publish discovery configs (retained)
  * - Publish states as needed
  *
@@ -196,9 +209,27 @@ public:
    *
    * The strings are copied, so the pointers in @p dev only need to be valid during this call.
    *
+   * This also sets the MQTT Last Will to "offline" on the default availability topic,
+   * so call it before connecting. Entities with an availability_topic_override are
+   * not covered by the will.
+   *
    * @param dev Device info struct
    */
   void setDevice(const HaDeviceInfo& dev);
+
+  /**
+   * @brief Set the handler for commands from Home Assistant.
+   *
+   * It's called when a message arrives on the command topic of a switch or button
+   * published with publishSwitchDiscovery() or publishButtonDiscovery().
+   * For a switch, publish the new state with publishStateSwitch() after acting on it.
+   *
+   * @note With AsyncMqttClient the handler runs in the network task, not in loop().
+   *       Keep it short, and hand longer work over to loop().
+   *
+   * @param cb Command handler
+   */
+  void onCommand(HaCommandCallback cb);
 
   /**
    * @brief Periodic processing hook.
@@ -269,7 +300,8 @@ public:
    * @brief Remove an entity from Home Assistant by clearing its retained config topic.
    *
    * Home Assistant removes the entity when the Discovery config topic is published
-   * with an empty payload and retain=true.
+   * with an empty payload and retain=true. Commands for a removed switch or button
+   * are no longer passed to the command handler.
    *
    * @param component Component name (e.g. "sensor", "switch")
    * @param object_id Entity object_id used in the config topic
@@ -360,6 +392,11 @@ public:
 private:
   static void onTransportConnectThunk(void* ctx);
   void onTransportConnect();
+  static void onTransportMessageThunk(void* ctx, const char* topic, const uint8_t* payload, size_t len);
+  void onTransportMessage(const char* topic, const uint8_t* payload, size_t len);
+
+  void registerCommandTopic(const std::string& topic, const char* object_id);
+  void unregisterCommandTopics(const char* object_id);
 
   std::string buildConfigTopic(const char* component, const char* object_id) const;
   std::string buildDefaultStateTopic(const char* object_id) const;
@@ -390,8 +427,16 @@ private:
   MqttTransport& _transport;
   std::string _discoveryPrefix;
   std::string _baseTopicPrefix;
+  /** @brief A command topic and the object_id it belongs to. */
+  struct CommandRoute {
+    std::string topic;
+    std::string object_id;
+  };
+
   JBLogger _log;
   DeviceData _device;
+  std::vector<CommandRoute> _commands;
+  HaCommandCallback _onCommand;
 
   static constexpr size_t JSON_BUF = 768;
 };

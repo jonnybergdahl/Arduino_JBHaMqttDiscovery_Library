@@ -25,6 +25,16 @@ AsyncMqttClientTransport transport(mqtt);
 HaDiscovery ha(transport);
 JBLogger logger("Main");
 
+// Called when Home Assistant sends a command to a switch or button
+void onCommand(const char* objectId, const char* payload) {
+  logger.info("Command for %s: %s", objectId, payload);
+  if (strcmp(objectId, "relay1") == 0) {
+    bool on = strcmp(payload, "ON") == 0;
+    // Switch the real relay here, then report the new state back
+    ha.publishStateSwitch("relay1", on);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   logger.setLogLevel(LOG_LEVEL_DEBUG);
@@ -52,7 +62,9 @@ void setup() {
   });
 
   transport.setServer(mqtt_host, 1883, mqtt_user, mqtt_pass);
-  mqtt.connect();
+  ha.onCommand(onCommand);
+  // Connect through the transport so the Last Will and credentials are used
+  transport.connect(nodeId.c_str());
 
   HaSensorConfig temp{
     .common = { .object_id="temperature", .name="Kitchen Temperature" },

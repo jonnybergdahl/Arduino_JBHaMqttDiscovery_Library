@@ -20,13 +20,20 @@
  *
  * This transport provides the most reliable behavior for Home Assistant
  * discovery and availability handling.
+ *
+ * AsyncMqttClient keeps pointers to the host, client id, credentials and will
+ * instead of copying them. This transport keeps its own copies, so callers
+ * don't need to keep those strings alive.
+ *
+ * Incoming messages split over several TCP packets are ignored. Discovery
+ * command payloads are short, so this doesn't happen in practice.
  */
 class AsyncMqttClientTransport : public MqttTransport {
 public:
   /**
    * @brief Construct an AsyncMqttClient transport adapter.
    *
-   * @param client Reference to an already configured AsyncMqttClient instance
+   * @param client Reference to an AsyncMqttClient instance
    */
   explicit AsyncMqttClientTransport(AsyncMqttClient& client)
     : client(client) {}
@@ -34,16 +41,16 @@ public:
   /**
    * @brief Set MQTT server and credentials.
    *
+   * All strings are copied.
+   *
    * @param host MQTT host/IP
    * @param port MQTT port
-   * @param user MQTT username
-   * @param pass MQTT password
+   * @param user MQTT username (optional)
+   * @param pass MQTT password (optional)
    */
   void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) override {
-    client.setServer(host, port);
-    if (user && pass) {
-      client.setCredentials(user, pass);
-    }
+    setServer(std::string(host ? host : ""), port,
+              std::string(user ? user : ""), std::string(pass ? pass : ""));
   }
 
   /**
@@ -51,14 +58,33 @@ public:
    *
    * @param host MQTT host/IP
    * @param port MQTT port
-   * @param user MQTT username
-   * @param pass MQTT password
+   * @param user MQTT username (empty for none)
+   * @param pass MQTT password (empty for none)
    */
   void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") override {
-    client.setServer(host.c_str(), port);
-    if (!user.empty() && !pass.empty()) {
-      client.setCredentials(user.c_str(), pass.c_str());
+    hostStr = host;
+    userStr = user;
+    passStr = pass;
+    client.setServer(hostStr.c_str(), port);
+    if (!userStr.empty()) {
+      client.setCredentials(userStr.c_str(), passStr.empty() ? nullptr : passStr.c_str());
     }
+  }
+
+  /**
+   * @inheritdoc
+   *
+   * Starts the connection and returns right away. The onConnect callback
+   * fires when the connection is established.
+   */
+  bool connect(const char* clientId = nullptr) override {
+    if (clientId && *clientId) {
+      clientIdStr = clientId;
+      client.setClientId(clientIdStr.c_str());
+    }
+    if (log) log->info("Async connecting");
+    client.connect();
+    return true;
   }
 
   /**
@@ -87,17 +113,69 @@ public:
     if (log) log->debug("Async publish topic=%s len=%u retained=%d qos=%u", topic,
                         (unsigned)l, retained ? 1 : 0, (unsigned)qos);
 
+    // Returns the packet id (1 for QoS 0), or 0 on failure
     uint16_t pid = client.publish(topic, qos, retained, p, l);
     if (pid == 0) {
       if (log) log->error("Async publish FAILED topic=%s", topic);
-    } else {
-      if (log) log->debug("Async publish OK topic=%s pid=%u", topic, (unsigned)pid);
+      return false;
     }
+    if (log) log->debug("Async publish OK topic=%s pid=%u", topic, (unsigned)pid);
     return true;
   }
 
   /**
    * @inheritdoc
+   */
+  bool subscribe(const char* topic, uint8_t qos = 0) override {
+    if (!isConnected) {
+      if (log) log->warning("Async subscribe skipped (disconnected) topic=%s", topic);
+      return false;
+    }
+    uint16_t pid = client.subscribe(topic, qos);
+    if (pid == 0) {
+      if (log) log->error("Async subscribe FAILED topic=%s", topic);
+      return false;
+    }
+    if (log) log->debug("Async subscribe OK topic=%s pid=%u", topic, (unsigned)pid);
+    return true;
+  }
+
+  /**
+   * @inheritdoc
+   *
+   * Call this only once; AsyncMqttClient adds a new handler on every call.
+   */
+  void setOnMessage(MessageCallback cb_, void* ctx_) override {
+    msgCb = cb_;
+    msgCtx = ctx_;
+
+    client.onMessage([this](char* topic, char* payload, AsyncMqttClientMessageProperties /*properties*/,
+                            size_t len, size_t index, size_t total) {
+      if (index != 0 || len != total) {
+        if (log) log->warning("Async message on %s split into parts (%u of %u bytes), ignored",
+                              topic, (unsigned)len, (unsigned)total);
+        return;
+      }
+      if (log) log->debug("Async message topic=%s len=%u", topic, (unsigned)len);
+      if (msgCb) {
+        msgCb(msgCtx, topic, reinterpret_cast<const uint8_t*>(payload), len);
+      }
+    });
+  }
+
+  /**
+   * @inheritdoc
+   */
+  void setWill(const char* topic, const char* payload, bool retained = true, uint8_t qos = 1) override {
+    willTopicStr = topic ? topic : "";
+    willPayloadStr = payload ? payload : "";
+    client.setWill(willTopicStr.c_str(), qos, retained, willPayloadStr.c_str(), willPayloadStr.size());
+  }
+
+  /**
+   * @inheritdoc
+   *
+   * Call this only once; AsyncMqttClient adds new handlers on every call.
    */
   void setOnConnect(void (*cb_)(void*), void* ctx_) override {
     cb = cb_;
@@ -117,9 +195,17 @@ public:
 
 private:
   AsyncMqttClient& client;
+  std::string hostStr;
+  std::string userStr;
+  std::string passStr;
+  std::string clientIdStr;
+  std::string willTopicStr;
+  std::string willPayloadStr;
   volatile bool isConnected = false;
   void (*cb)(void*) = nullptr;
   /** @brief Pointer to user context for callback. */
   void* ctx = nullptr;
+  MessageCallback msgCb = nullptr;
+  void* msgCtx = nullptr;
 };
 /** @} */

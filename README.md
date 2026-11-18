@@ -44,9 +44,10 @@ void setup() {
     .identifiers = mac.c_str()
   });
 
-  // Configure mqtt server/credentials through the transport, then connect:
+  // Configure mqtt server/credentials through the transport, then connect
+  // through the transport so the Last Will set by setDevice() is used:
   transport.setServer("mqtt-broker.local", 1883, "user", "pass");
-  mqtt.connect(nodeId.c_str(), "user", "pass");
+  transport.connect(nodeId.c_str());
 
   HaSwitchConfig sw{
     .common = { .object_id="relay1", .name="Desk Relay" }
@@ -95,9 +96,10 @@ void setup() {
     .identifiers = mac.c_str()
   });
 
-  // Configure mqtt host/credentials/LWT through the transport, then connect:
+  // Configure mqtt server/credentials through the transport, then connect
+  // through the transport so the Last Will set by setDevice() is used:
   transport.setServer("mqtt-broker.local", 1883, "user", "pass");
-  mqtt.connect();
+  transport.connect(nodeId.c_str());
 
   HaSensorConfig temp{
     .common = { .object_id="temperature", .name="Kitchen Temperature" },
@@ -117,6 +119,39 @@ void loop() {
   // nothing required for HaDiscovery
 }
 ```
+
+## Availability and Last Will
+
+`setDevice()` sets the MQTT Last Will to `offline` on the availability topic (`<base>/<node_id>/status`, retained).
+When the connection comes up, the library publishes `online` there.
+If the device loses power or network, the broker publishes `offline` and Home Assistant marks its entities unavailable.
+
+Call `setDevice()` before connecting, and connect through the transport (`transport.connect(...)`), not the MQTT client, so the will is sent.
+
+## Commands from Home Assistant
+
+Switches and buttons get a command topic (`<base>/<node_id>/<object_id>/set` by default).
+The library subscribes to it, again after every reconnect, and passes incoming commands to one handler:
+
+```c++
+void onCommand(const char* objectId, const char* payload) {
+  if (strcmp(objectId, "relay1") == 0) {
+    bool on = strcmp(payload, "ON") == 0;
+    digitalWrite(RELAY_PIN, on ? HIGH : LOW);
+    ha.publishStateSwitch("relay1", on); // report the new state back
+  }
+  if (strcmp(objectId, "restart") == 0) {
+    ESP.restart();
+  }
+}
+
+void setup() {
+  // ...
+  ha.onCommand(onCommand);
+}
+```
+
+> With AsyncMqttClient the handler runs in the network task, not in `loop()`. Keep it short and hand longer work over to `loop()`.
 
 ## Entity usage
 
@@ -143,7 +178,8 @@ HaSwitchConfig relay{
 };
 ha.publishSwitchDiscovery(relay);
 
-// later:
+// "ON"/"OFF" commands arrive in the onCommand() handler.
+// Report the state:
 ha.publishStateSwitch("relay1", true); // ON
 ```
 
@@ -169,6 +205,5 @@ HaButtonConfig restart{
 };
 ha.publishButtonDiscovery(restart);
 
-// later:
-ha.pressButton("restart");
+// Presses arrive in the onCommand() handler with the "PRESS" payload.
 ```

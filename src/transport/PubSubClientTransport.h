@@ -19,8 +19,9 @@
  * - PubSubClient's default 256 byte packet buffer is too small for discovery
  *   payloads. This transport raises it to at least DEFAULT_BUFFER_SIZE in
  *   setServer(), and grows it further if a publish needs more.
- * - QoS handling is best-effort.
+ * - QoS handling is best-effort (publish is always QoS 0, subscribe supports 0 and 1).
  * - Connection events are detected via rising-edge logic in tick().
+ * - The transport takes over PubSubClient's message callback.
  */
 class PubSubClientTransport : public MqttTransport {
 public:
@@ -45,16 +46,16 @@ public:
   /**
    * @brief Set MQTT server and credentials.
    *
+   * All strings are copied.
+   *
    * @param host MQTT host/IP
    * @param port MQTT port
-   * @param user MQTT username
-   * @param pass MQTT password
+   * @param user MQTT username (optional)
+   * @param pass MQTT password (optional)
    */
   void setServer(const char* host, uint16_t port, const char* user = nullptr, const char* pass = nullptr) override {
-    client.setServer(host, port);
-    ensureBufferSize(minBufferSize);
-    this->user = user;
-    this->pass = pass;
+    setServer(std::string(host ? host : ""), port,
+              std::string(user ? user : ""), std::string(pass ? pass : ""));
   }
 
   /**
@@ -62,16 +63,40 @@ public:
    *
    * @param host MQTT host/IP
    * @param port MQTT port
-   * @param user MQTT username
-   * @param pass MQTT password
+   * @param user MQTT username (empty for none)
+   * @param pass MQTT password (empty for none)
    */
   void setServer(const std::string& host, uint16_t port, const std::string& user = "", const std::string& pass = "") override {
-    client.setServer(host.c_str(), port);
+    // PubSubClient keeps the host pointer, so it must point at our own copy
+    hostStr = host;
+    userStr = user;
+    passStr = pass;
+    client.setServer(hostStr.c_str(), port);
     ensureBufferSize(minBufferSize);
-    this->userStr = user;
-    this->passStr = pass;
-    this->user = this->userStr.c_str();
-    this->pass = this->passStr.c_str();
+  }
+
+  /**
+   * @inheritdoc
+   *
+   * Blocks until the broker answers or the connection fails.
+   */
+  bool connect(const char* clientId = nullptr) override {
+    if (!clientId || !*clientId) {
+      if (log) log->error("PubSub connect needs a client id");
+      return false;
+    }
+
+    const char* user = userStr.empty() ? nullptr : userStr.c_str();
+    const char* pass = passStr.empty() ? nullptr : passStr.c_str();
+    const char* willTopic = willTopicStr.empty() ? nullptr : willTopicStr.c_str();
+    const char* willMessage = willTopic ? willPayloadStr.c_str() : nullptr;
+
+    if (log) log->info("PubSub connecting as %s", clientId);
+    bool ok = client.connect(clientId, user, pass, willTopic, willQos, willRetain, willMessage);
+    if (!ok) {
+      if (log) log->error("PubSub connect FAILED, state=%d", client.state());
+    }
+    return ok;
   }
 
   /**
@@ -121,6 +146,50 @@ public:
   /**
    * @inheritdoc
    */
+  bool subscribe(const char* topic, uint8_t qos = 0) override {
+    bool ok = client.subscribe(topic, qos > 1 ? 1 : qos);
+    if (log) {
+      if (ok) {
+        log->debug("PubSub subscribe OK topic=%s", topic);
+      } else {
+        log->error("PubSub subscribe FAILED topic=%s", topic);
+      }
+    }
+    return ok;
+  }
+
+  /**
+   * @inheritdoc
+   *
+   * This replaces any callback set directly with PubSubClient::setCallback().
+   */
+  void setOnMessage(MessageCallback cb_, void* ctx_) override {
+    msgCb = cb_;
+    msgCtx = ctx_;
+#if defined(ESP8266) || defined(ESP32)
+    client.setCallback([this](char* topic, uint8_t* payload, unsigned int len) {
+      handleMessage(topic, payload, len);
+    });
+#else
+    // Plain function pointer callback, so only one instance can receive messages
+    instance() = this;
+    client.setCallback(&PubSubClientTransport::messageThunk);
+#endif
+  }
+
+  /**
+   * @inheritdoc
+   */
+  void setWill(const char* topic, const char* payload, bool retained = true, uint8_t qos = 1) override {
+    willTopicStr = topic ? topic : "";
+    willPayloadStr = payload ? payload : "";
+    willRetain = retained;
+    willQos = qos > 1 ? 1 : qos;
+  }
+
+  /**
+   * @inheritdoc
+   */
   void setOnConnect(void (*cb_)(void*), void* ctx_) override {
     cb = cb_;
     ctx = ctx_;
@@ -149,6 +218,26 @@ public:
   }
 
 private:
+  void handleMessage(const char* topic, const uint8_t* payload, unsigned int len) {
+    if (log) log->debug("PubSub message topic=%s len=%u", topic, len);
+    if (msgCb) {
+      msgCb(msgCtx, topic, payload, len);
+    }
+  }
+
+#if !(defined(ESP8266) || defined(ESP32))
+  static PubSubClientTransport*& instance() {
+    static PubSubClientTransport* inst = nullptr;
+    return inst;
+  }
+
+  static void messageThunk(char* topic, uint8_t* payload, unsigned int len) {
+    if (instance()) {
+      instance()->handleMessage(topic, payload, len);
+    }
+  }
+#endif
+
   /**
    * @brief Grow the PubSubClient buffer to at least @p size bytes. Never shrinks it.
    *
@@ -166,13 +255,18 @@ private:
 
   PubSubClient& client;
   uint16_t minBufferSize;
-  const char* user = nullptr;
-  const char* pass = nullptr;
+  std::string hostStr;
   std::string userStr;
   std::string passStr;
+  std::string willTopicStr;
+  std::string willPayloadStr;
+  bool willRetain = true;
+  uint8_t willQos = 1;
   bool wasConnected = false;
   void (*cb)(void*) = nullptr;
   /** @brief Pointer to user context for callback. */
   void* ctx = nullptr;
+  MessageCallback msgCb = nullptr;
+  void* msgCtx = nullptr;
 };
 /** @} */

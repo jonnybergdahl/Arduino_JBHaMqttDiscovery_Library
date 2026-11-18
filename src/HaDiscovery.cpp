@@ -24,6 +24,7 @@ HaDiscovery::HaDiscovery(MqttTransport& transport,
     _log("HaDiscovery", log_level) {
   _transport.setLogger(&_log);
   _transport.setOnConnect(&HaDiscovery::onTransportConnectThunk, this);
+  _transport.setOnMessage(&HaDiscovery::onTransportMessageThunk, this);
 }
 
 void HaDiscovery::setLogLevel(LogLevel level) {
@@ -38,6 +39,15 @@ void HaDiscovery::setDevice(const HaDeviceInfo& dev) {
   _device.model = copy(dev.model);
   _device.sw_version = copy(dev.sw_version);
   _device.identifiers = copy(dev.identifiers);
+
+  if (hasDevice()) {
+    // The broker publishes this if the device drops off without disconnecting
+    _transport.setWill(buildDefaultAvailabilityTopic().c_str(), kAvailOffline, true, 1);
+  }
+}
+
+void HaDiscovery::onCommand(HaCommandCallback cb) {
+  _onCommand = cb;
 }
 
 void HaDiscovery::tick() {
@@ -55,6 +65,67 @@ void HaDiscovery::onTransportConnect() {
   // Default behavior: publish availability online on connect.
   // Optional enhancement: re-publish all registered discovery configs.
   publishAvailabilityOnline(true, 1);
+
+  // Subscriptions don't survive a clean-session reconnect
+  for (const CommandRoute& route : _commands) {
+    _transport.subscribe(route.topic.c_str(), 1);
+  }
+}
+
+void HaDiscovery::onTransportMessageThunk(void* ctx, const char* topic, const uint8_t* payload, size_t len) {
+  static_cast<HaDiscovery*>(ctx)->onTransportMessage(topic, payload, len);
+}
+
+void HaDiscovery::onTransportMessage(const char* topic, const uint8_t* payload, size_t len) {
+  if (!topic) {
+    return;
+  }
+  for (const CommandRoute& route : _commands) {
+    if (route.topic == topic) {
+      std::string p = payload ? std::string(reinterpret_cast<const char*>(payload), len) : std::string();
+#ifdef HAS_LOG
+      _log.debug("Command for %s: %s", route.object_id.c_str(), p.c_str());
+#endif
+      if (_onCommand) {
+        _onCommand(route.object_id.c_str(), p.c_str());
+      }
+#ifdef HAS_LOG
+      else {
+        _log.warning("Command for %s received, but no handler is set", route.object_id.c_str());
+      }
+#endif
+      return;
+    }
+  }
+}
+
+void HaDiscovery::registerCommandTopic(const std::string& topic, const char* object_id) {
+  for (CommandRoute& route : _commands) {
+    if (route.object_id == object_id) {
+      if (route.topic == topic) {
+        return;
+      }
+      route.topic = topic;
+      if (_transport.connected()) {
+        _transport.subscribe(topic.c_str(), 1);
+      }
+      return;
+    }
+  }
+  _commands.push_back({topic, object_id});
+  if (_transport.connected()) {
+    _transport.subscribe(topic.c_str(), 1);
+  }
+}
+
+void HaDiscovery::unregisterCommandTopics(const char* object_id) {
+  for (auto it = _commands.begin(); it != _commands.end();) {
+    if (it->object_id == object_id) {
+      it = _commands.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void HaDiscovery::publishAvailabilityOnline(bool retained, uint8_t qos) {
@@ -106,6 +177,10 @@ bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retaine
     return false;
   }
 
+  registerCommandTopic(cfg.command_topic_override
+                         ? std::string(cfg.command_topic_override)
+                         : buildDefaultCommandTopic(cfg.common.object_id),
+                       cfg.common.object_id);
   return publishConfigJson(topic.c_str(), json, retained, qos);
 }
 
@@ -136,6 +211,10 @@ bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retaine
     return false;
   }
 
+  registerCommandTopic(cfg.command_topic_override
+                         ? std::string(cfg.command_topic_override)
+                         : buildDefaultCommandTopic(cfg.common.object_id),
+                       cfg.common.object_id);
   return publishConfigJson(topic.c_str(), json, retained, qos);
 }
 
@@ -145,6 +224,10 @@ bool HaDiscovery::removeEntity(const char* component, const char* object_id, uin
   }
 
   std::string topic = buildConfigTopic(component, object_id);
+
+  if (strcmp(component, "switch") == 0 || strcmp(component, "button") == 0) {
+    unregisterCommandTopics(object_id);
+  }
 
   // Empty retained config payload removes entity in Home Assistant
   return _transport.publish(topic.c_str(), nullptr, 0, true, qos);

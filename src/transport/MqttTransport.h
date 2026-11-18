@@ -25,18 +25,78 @@
  * - asynchronous / event-driven MQTT clients (e.g. AsyncMqttClient)
  *
  * The transport is responsible only for:
+ * - connecting with the configured server, credentials and Last Will
  * - reporting connection state
  * - publishing MQTT messages
+ * - subscribing to topics and passing incoming messages on
  * - notifying when a connection is (re)established
+ *
+ * Transports copy every string passed to them, so callers don't need to keep
+ * them alive.
  *
  * It does NOT:
  * - manage Wi-Fi
- * - manage MQTT configuration
+ * - reconnect automatically
  * - perform polling (except via tick() for sync clients)
  */
 class MqttTransport {
 public:
+  /**
+   * @brief Callback for incoming messages.
+   *
+   * @param ctx     User context pointer given to setOnMessage()
+   * @param topic   Topic the message arrived on (null-terminated)
+   * @param payload Payload bytes (not null-terminated)
+   * @param len     Payload length in bytes
+   */
+  using MessageCallback = void (*)(void* ctx, const char* topic, const uint8_t* payload, size_t len);
+
   virtual ~MqttTransport() = default;
+
+  /**
+   * @brief Connect to the MQTT server set with setServer().
+   *
+   * Uses the credentials from setServer() and the Last Will from setWill().
+   * For asynchronous transports this only starts the connection; the
+   * onConnect callback fires when it's established.
+   *
+   * @param clientId MQTT client id. Required by synchronous transports.
+   *                 Asynchronous transports generate one if nullptr.
+   * @return true if the connection was established (sync) or started (async)
+   */
+  virtual bool connect(const char* clientId = nullptr) = 0;
+
+  /**
+   * @brief Subscribe to a topic.
+   *
+   * Subscriptions don't survive a reconnect with a clean session, so subscribe
+   * again from the onConnect callback.
+   *
+   * @param topic MQTT topic (null-terminated string)
+   * @param qos   Requested QoS level (0 or 1)
+   * @return true if the subscribe request was accepted, false otherwise
+   */
+  virtual bool subscribe(const char* topic, uint8_t qos = 0) = 0;
+
+  /**
+   * @brief Register a callback for incoming messages on subscribed topics.
+   *
+   * @param cb  Callback function
+   * @param ctx User context pointer passed back to the callback
+   */
+  virtual void setOnMessage(MessageCallback cb, void* ctx) = 0;
+
+  /**
+   * @brief Set the Last Will the broker publishes if the connection drops.
+   *
+   * Must be called before connect().
+   *
+   * @param topic    Will topic
+   * @param payload  Will payload (e.g. "offline")
+   * @param retained Retain flag for the will message
+   * @param qos      QoS level for the will message
+   */
+  virtual void setWill(const char* topic, const char* payload, bool retained = true, uint8_t qos = 1) = 0;
 
   /**
    * @brief Check whether the MQTT client is currently connected.

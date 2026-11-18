@@ -17,9 +17,47 @@ public:
     };
 
     std::vector<Message> messages;
+    std::vector<std::string> subscriptions;
+    std::string willTopic;
+    std::string willPayload;
+    bool willRetained = false;
     bool isConnected = true;
     void (*onConnectCb)(void*) = nullptr;
     void* onConnectCtx = nullptr;
+    MessageCallback onMessageCb = nullptr;
+    void* onMessageCtx = nullptr;
+
+    bool connect(const char* clientId = nullptr) override { return true; }
+
+    bool subscribe(const char* topic, uint8_t qos = 0) override {
+        subscriptions.push_back(topic);
+        return true;
+    }
+
+    void setOnMessage(MessageCallback cb, void* ctx) override {
+        onMessageCb = cb;
+        onMessageCtx = ctx;
+    }
+
+    void setWill(const char* topic, const char* payload, bool retained = true, uint8_t qos = 1) override {
+        willTopic = topic;
+        willPayload = payload;
+        willRetained = retained;
+    }
+
+    // Simulate a message arriving from the broker
+    void deliver(const char* topic, const char* payload) {
+        if (onMessageCb) {
+            onMessageCb(onMessageCtx, topic, (const uint8_t*)payload, strlen(payload));
+        }
+    }
+
+    // Simulate the connection coming up
+    void fireConnect() {
+        if (onConnectCb) {
+            onConnectCb(onConnectCtx);
+        }
+    }
 
     bool connected() const override { return isConnected; }
 
@@ -45,14 +83,21 @@ public:
 
     void clear() {
         messages.clear();
+        subscriptions.clear();
+        willTopic.clear();
+        willPayload.clear();
+        isConnected = true;
     }
 };
 
 MockTransport transport;
 HaDiscovery* discovery;
 
+std::vector<std::pair<std::string, std::string>> commands;
+
 void setUp(void) {
     transport.clear();
+    commands.clear();
     discovery = new HaDiscovery(transport, "homeassistant", "devices");
     discovery->setLogLevel(LOG_LEVEL_NONE);
 
@@ -239,6 +284,83 @@ void test_no_device_publishes_nothing(void) {
     TEST_ASSERT_EQUAL(0, transport.messages.size());
 }
 
+void test_will_set_by_set_device(void) {
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/status", transport.willTopic.c_str());
+    TEST_ASSERT_EQUAL_STRING("offline", transport.willPayload.c_str());
+    TEST_ASSERT_TRUE(transport.willRetained);
+}
+
+static void recordCommand(const char* object_id, const char* payload) {
+    commands.push_back({object_id, payload});
+}
+
+void test_switch_command_routed_to_handler(void) {
+    discovery->onCommand(recordCommand);
+    HaSwitchConfig cfg;
+    cfg.common.object_id = "relay";
+    discovery->publishSwitchDiscovery(cfg);
+
+    TEST_ASSERT_EQUAL(1, transport.subscriptions.size());
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/relay/set", transport.subscriptions[0].c_str());
+
+    transport.deliver("devices/test_node/relay/set", "ON");
+    TEST_ASSERT_EQUAL(1, commands.size());
+    TEST_ASSERT_EQUAL_STRING("relay", commands[0].first.c_str());
+    TEST_ASSERT_EQUAL_STRING("ON", commands[0].second.c_str());
+}
+
+void test_button_command_override_topic(void) {
+    discovery->onCommand(recordCommand);
+    HaButtonConfig cfg;
+    cfg.common.object_id = "restart";
+    cfg.command_topic_override = "custom/restart";
+    discovery->publishButtonDiscovery(cfg);
+
+    transport.deliver("devices/test_node/restart/set", "PRESS");
+    TEST_ASSERT_EQUAL(0, commands.size());
+
+    transport.deliver("custom/restart", "PRESS");
+    TEST_ASSERT_EQUAL(1, commands.size());
+    TEST_ASSERT_EQUAL_STRING("restart", commands[0].first.c_str());
+}
+
+void test_unknown_topic_ignored(void) {
+    discovery->onCommand(recordCommand);
+    transport.deliver("devices/test_node/other/set", "ON");
+    TEST_ASSERT_EQUAL(0, commands.size());
+}
+
+void test_subscribe_waits_for_connect(void) {
+    transport.isConnected = false;
+    HaSwitchConfig cfg;
+    cfg.common.object_id = "relay";
+    discovery->publishSwitchDiscovery(cfg);
+    TEST_ASSERT_EQUAL(0, transport.subscriptions.size());
+
+    transport.isConnected = true;
+    transport.fireConnect();
+    TEST_ASSERT_EQUAL(1, transport.subscriptions.size());
+    TEST_ASSERT_EQUAL_STRING("devices/test_node/relay/set", transport.subscriptions[0].c_str());
+
+    // And again after a reconnect, without duplicating the route
+    transport.subscriptions.clear();
+    discovery->publishSwitchDiscovery(cfg);
+    transport.subscriptions.clear();
+    transport.fireConnect();
+    TEST_ASSERT_EQUAL(1, transport.subscriptions.size());
+}
+
+void test_removed_switch_stops_commands(void) {
+    discovery->onCommand(recordCommand);
+    HaSwitchConfig cfg;
+    cfg.common.object_id = "relay";
+    discovery->publishSwitchDiscovery(cfg);
+    discovery->removeEntity("switch", "relay");
+
+    transport.deliver("devices/test_node/relay/set", "ON");
+    TEST_ASSERT_EQUAL(0, commands.size());
+}
+
 // Support for native environment where setup/loop might not be enough for unity runner
 #if defined(ARDUINO)
 void setup() {
@@ -255,6 +377,12 @@ void setup() {
     RUN_TEST(test_press_button);
     RUN_TEST(test_device_strings_are_copied);
     RUN_TEST(test_no_device_publishes_nothing);
+    RUN_TEST(test_will_set_by_set_device);
+    RUN_TEST(test_switch_command_routed_to_handler);
+    RUN_TEST(test_button_command_override_topic);
+    RUN_TEST(test_unknown_topic_ignored);
+    RUN_TEST(test_subscribe_waits_for_connect);
+    RUN_TEST(test_removed_switch_stops_commands);
     UNITY_END();
 }
 
@@ -273,6 +401,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_press_button);
     RUN_TEST(test_device_strings_are_copied);
     RUN_TEST(test_no_device_publishes_nothing);
+    RUN_TEST(test_will_set_by_set_device);
+    RUN_TEST(test_switch_command_routed_to_handler);
+    RUN_TEST(test_button_command_override_topic);
+    RUN_TEST(test_unknown_topic_ignored);
+    RUN_TEST(test_subscribe_waits_for_connect);
+    RUN_TEST(test_removed_switch_stops_commands);
     return UNITY_END();
 }
 #endif
