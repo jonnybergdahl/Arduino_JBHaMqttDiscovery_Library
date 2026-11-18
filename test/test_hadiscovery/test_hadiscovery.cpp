@@ -474,6 +474,66 @@ void test_removed_entity_not_republished(void) {
     TEST_ASSERT_EQUAL_STRING("online", transport.messages[0].payload.c_str());
 }
 
+static JsonDocument lastPayload() {
+    JsonDocument doc;
+    deserializeJson(doc, transport.messages.back().payload);
+    return doc;
+}
+
+void test_origin_defaults_to_library(void) {
+    HaSensorConfig cfg;
+    cfg.common.object_id = "temp";
+    discovery->publishSensorDiscovery(cfg);
+    JsonDocument doc = lastPayload();
+    TEST_ASSERT_EQUAL_STRING(JBHAMQTTDISCOVERY_NAME, doc["o"]["name"]);
+    TEST_ASSERT_EQUAL_STRING(JBHAMQTTDISCOVERY_VERSION, doc["o"]["sw"]);
+    TEST_ASSERT_EQUAL_STRING(JBHAMQTTDISCOVERY_URL, doc["o"]["url"]);
+}
+
+void test_set_origin(void) {
+    discovery->setOrigin("MyFirmware", "2.3.4");
+    HaSwitchConfig cfg;
+    cfg.common.object_id = "relay";
+    discovery->publishSwitchDiscovery(cfg);
+    JsonDocument doc = lastPayload();
+    TEST_ASSERT_EQUAL_STRING("MyFirmware", doc["o"]["name"]);
+    TEST_ASSERT_EQUAL_STRING("2.3.4", doc["o"]["sw"]);
+    TEST_ASSERT_FALSE(doc["o"]["url"].is<const char*>());
+}
+
+void test_default_entity_id_gets_domain(void) {
+    HaBinarySensorConfig cfg;
+    cfg.common.object_id = "motion";
+    cfg.common.entity_id = "hallway_motion";
+    discovery->publishBinarySensorDiscovery(cfg);
+    TEST_ASSERT_EQUAL_STRING("binary_sensor.hallway_motion", lastPayload()["def_ent_id"]);
+
+    HaSensorConfig plain;
+    plain.common.object_id = "temp";
+    discovery->publishSensorDiscovery(plain);
+    TEST_ASSERT_FALSE(lastPayload()["def_ent_id"].is<const char*>());
+}
+
+void test_use_device_name_sends_null_name(void) {
+    HaSwitchConfig cfg;
+    cfg.common.object_id = "relay";
+    cfg.common.name = "ignored";
+    cfg.common.use_device_name = true;
+    discovery->publishSwitchDiscovery(cfg);
+    // The key must be present with a JSON null value, not left out
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, transport.messages.back().payload.find("\"name\":null"));
+}
+
+void test_icon_uses_abbreviation(void) {
+    HaButtonConfig cfg;
+    cfg.common.object_id = "restart";
+    cfg.common.icon = "mdi:restart";
+    discovery->publishButtonDiscovery(cfg);
+    JsonDocument doc = lastPayload();
+    TEST_ASSERT_EQUAL_STRING("mdi:restart", doc["ic"]);
+    TEST_ASSERT_FALSE(doc["icon"].is<const char*>());
+}
+
 // Support for native environment where setup/loop might not be enough for unity runner
 #if defined(ARDUINO)
 void setup() {
@@ -503,6 +563,11 @@ void setup() {
     RUN_TEST(test_birth_offline_ignored);
     RUN_TEST(test_publish_during_pending_connect_sent_once);
     RUN_TEST(test_removed_entity_not_republished);
+    RUN_TEST(test_origin_defaults_to_library);
+    RUN_TEST(test_set_origin);
+    RUN_TEST(test_default_entity_id_gets_domain);
+    RUN_TEST(test_use_device_name_sends_null_name);
+    RUN_TEST(test_icon_uses_abbreviation);
     UNITY_END();
 }
 
@@ -534,6 +599,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_birth_offline_ignored);
     RUN_TEST(test_publish_during_pending_connect_sent_once);
     RUN_TEST(test_removed_entity_not_republished);
+    RUN_TEST(test_origin_defaults_to_library);
+    RUN_TEST(test_set_origin);
+    RUN_TEST(test_default_entity_id_gets_domain);
+    RUN_TEST(test_use_device_name_sends_null_name);
+    RUN_TEST(test_icon_uses_abbreviation);
     return UNITY_END();
 }
 #endif

@@ -50,12 +50,12 @@ void setup() {
   transport.connect(nodeId.c_str());
 
   HaSwitchConfig sw{
-    .common = { .object_id="relay1", .name="Desk Relay" }
+    .common = { .object_id="relay1", .name="Relay" }
   };
   ha.publishSwitchDiscovery(sw);
 
   HaSensorConfig temp{
-    .common = { .object_id="temperature", .name="Office Temperature" },
+    .common = { .object_id="temperature", .name="Temperature" },
     .unit_of_measurement="°C",
     .device_class="temperature"
   };
@@ -68,7 +68,7 @@ void loop() {
 }
 ```
 
-> PubSubClient's default 256 byte buffer is too small for discovery payloads, which are usually 350–500 bytes.
+> PubSubClient's default 256 byte buffer is too small for discovery payloads, which are usually 400–600 bytes.
 > `PubSubClientTransport` raises it to 1024 bytes in `setServer()`, and grows it further if a publish needs more.
 > Pass a different minimum as the second constructor argument, e.g. `PubSubClientTransport transport(mqtt, 2048);`.
 
@@ -102,7 +102,7 @@ void setup() {
   transport.connect(nodeId.c_str());
 
   HaSensorConfig temp{
-    .common = { .object_id="temperature", .name="Kitchen Temperature" },
+    .common = { .object_id="temperature", .name="Temperature" },
     .unit_of_measurement="°C",
     .device_class="temperature",
     .state_class="measurement"
@@ -110,7 +110,7 @@ void setup() {
   ha.publishSensorDiscovery(temp);
 
   HaSwitchConfig relay{
-    .common = { .object_id="relay1", .name="Kitchen Light" }
+    .common = { .object_id="relay1", .name="Light" }
   };
   ha.publishSwitchDiscovery(relay);
 }
@@ -141,7 +141,7 @@ So you can publish them in `setup()` right after `connect()`, even with AsyncMqt
 
 Call `ha.republishAll()` to send everything again yourself.
 
-> Each entity's config is kept in RAM (about 300–500 bytes each).
+> Each entity's config is kept in RAM (about 400–600 bytes each).
 
 ## Commands from Home Assistant
 
@@ -168,13 +168,43 @@ void setup() {
 
 > With AsyncMqttClient the handler runs in the network task, not in `loop()`. Keep it short and hand longer work over to `loop()`.
 
+## Entity names and IDs
+
+Home Assistant shows entities with the device name in front.
+So give entities short names without the device name: `"Temperature"` on device `"Office Node"` shows as **Office Node Temperature**.
+
+- `.use_device_name = true` sends `"name": null`. The entity is then the device's main feature and shows with just the device name, e.g. the relay of a smart plug.
+- `.entity_id = "office_temperature"` asks Home Assistant for the entity ID `sensor.office_temperature` (sent as `def_ent_id`, the domain is added for you). Home Assistant only uses it when it first creates the entity. Without it, Home Assistant makes the ID from the device and entity names, e.g. `sensor.office_node_temperature`.
+- `object_id` only sets the MQTT topics and the unique ID. It doesn't affect the entity ID.
+
+```c++
+HaSwitchConfig plug{
+  .common = { .object_id="relay", .use_device_name=true }
+};
+HaSensorConfig temp{
+  .common = { .object_id="temperature", .name="Temperature", .entity_id="office_temperature" },
+  .unit_of_measurement="°C",
+  .device_class="temperature"
+};
+```
+
+## Origin
+
+Every discovery config includes an origin block (`o`) with this library's name, version and URL.
+Home Assistant logs it when entities are discovered, which helps when tracking down where an entity came from.
+To send your firmware's details instead, call this before publishing discovery configs:
+
+```c++
+ha.setOrigin("MyFirmware", "2.1.0", "https://example.com/support");
+```
+
 ## Entity usage
 
 ### Sensor
 
 ```c++
 HaSensorConfig temp{
-  .common = { .object_id="temperature", .name="Kitchen Temperature", .icon="mdi:thermometer" },
+  .common = { .object_id="temperature", .name="Temperature", .icon="mdi:thermometer" },
   .unit_of_measurement="°C",
   .device_class="temperature",
   .state_class="measurement"
@@ -189,7 +219,7 @@ ha.publishState("temperature", "22.5");
 
 ```c++
 HaSwitchConfig relay{
-  .common = { .object_id="relay1", .name="Desk Light", .icon="mdi:lightbulb" }
+  .common = { .object_id="relay1", .name="Light", .icon="mdi:lightbulb" }
 };
 ha.publishSwitchDiscovery(relay);
 
@@ -202,7 +232,7 @@ ha.publishStateSwitch("relay1", true); // ON
 
 ```c++
 HaBinarySensorConfig motion{
-  .common = { .object_id="motion", .name="Hallway Motion", .icon="mdi:motion-sensor" },
+  .common = { .object_id="motion", .name="Motion", .icon="mdi:motion-sensor" },
   .device_class = "motion"
 };
 ha.publishBinarySensorDiscovery(motion);
@@ -215,7 +245,7 @@ ha.publishState("motion", "ON");
 
 ```c++
 HaButtonConfig restart{
-  .common = { .object_id="restart", .name="Restart Device", .icon="mdi:restart" },
+  .common = { .object_id="restart", .name="Restart", .icon="mdi:restart" },
   .payload_press = "PRESS"
 };
 ha.publishButtonDiscovery(restart);

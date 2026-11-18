@@ -7,6 +7,13 @@
 #include <ArduinoJson.h>
 #include "transport/MqttTransport.h"
 
+/** @brief Library name, sent as the default origin name. */
+#define JBHAMQTTDISCOVERY_NAME "JBHaMqttDiscovery"
+/** @brief Library version, sent as the default origin version. Keep in sync with library.properties. */
+#define JBHAMQTTDISCOVERY_VERSION "1.0.0"
+/** @brief Library URL, sent as the default origin support URL. */
+#define JBHAMQTTDISCOVERY_URL "https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery"
+
 /**
  * @defgroup hadiscovery Home Assistant MQTT Discovery
  * @brief Publish Home Assistant MQTT Discovery config payloads via an abstract MQTT transport.
@@ -61,7 +68,12 @@ struct HaEntityCommon {
   /** @brief Stable per-entity object_id (e.g. "temperature", "relay1"). */
   const char* object_id = nullptr;
 
-  /** @brief Human-friendly entity name shown in Home Assistant. */
+  /**
+   * @brief Entity name shown in Home Assistant, without the device name.
+   *
+   * Home Assistant puts the device name in front, so "Temperature" on device
+   * "Office Node" shows as "Office Node Temperature". If nullptr, object_id is used.
+   */
   const char* name = nullptr;
 
   /** @brief Optional icon (e.g. "mdi:thermometer"). */
@@ -82,6 +94,24 @@ struct HaEntityCommon {
    * `<baseTopicPrefix>/<node_id>/status`.
    */
   const char* availability_topic_override = nullptr;
+
+  /**
+   * @brief Optional entity ID Home Assistant should use, without the domain.
+   *
+   * Sent as `def_ent_id` with the domain added, so "office_temperature" on a sensor
+   * becomes `sensor.office_temperature`. Use lowercase letters, digits and underscores.
+   * Home Assistant only uses it when it first creates the entity. If nullptr, Home
+   * Assistant makes one up from the device and entity names.
+   */
+  const char* entity_id = nullptr;
+
+  /**
+   * @brief Mark this entity as the device's main feature.
+   *
+   * Sends `"name": null`, so the entity is shown with just the device name.
+   * The name field is ignored when this is true.
+   */
+  bool use_device_name = false;
 };
 
 /**
@@ -236,6 +266,20 @@ public:
    * @param cb Command handler
    */
   void onCommand(HaCommandCallback cb);
+
+  /**
+   * @brief Set the origin (`o`) sent in every discovery config.
+   *
+   * Home Assistant logs it when entities are discovered, and shows it in the
+   * MQTT device info. It defaults to this library's name, version and URL.
+   * Set it to your firmware's name, version and URL instead if you like.
+   * Call this before publishing discovery configs.
+   *
+   * @param name       Name of the software publishing discovery (required)
+   * @param sw_version Software version (optional)
+   * @param url        Support URL (optional)
+   */
+  void setOrigin(const char* name, const char* sw_version = nullptr, const char* url = nullptr);
 
   /**
    * @brief Periodic processing hook. Call this from loop().
@@ -443,15 +487,27 @@ private:
   std::string buildBirthTopic() const;
   bool canPublishNow() const;
 
-  bool buildSensorConfigJson(char* out, size_t outLen, const HaSensorConfig& cfg) const;
-  bool buildSwitchConfigJson(char* out, size_t outLen, const HaSwitchConfig& cfg) const;
-  bool buildBinarySensorConfigJson(char* out, size_t outLen, const HaBinarySensorConfig& cfg) const;
-  bool buildButtonConfigJson(char* out, size_t outLen, const HaButtonConfig& cfg) const;
+  // Each returns the serialized config, or an empty string on failure
+  std::string buildSensorConfigJson(const HaSensorConfig& cfg) const;
+  std::string buildSwitchConfigJson(const HaSwitchConfig& cfg) const;
+  std::string buildBinarySensorConfigJson(const HaBinarySensorConfig& cfg) const;
+  std::string buildButtonConfigJson(const HaButtonConfig& cfg) const;
+
+  void addCommonFields(JsonDocument& doc, const char* component, const HaEntityCommon& common) const;
+  std::string stateTopicFor(const HaEntityCommon& common) const;
+  static std::string serializeDoc(const JsonDocument& doc);
 
   void addDeviceObject(JsonDocument& doc) const;
   bool hasDevice() const { return !_device.node_id.empty(); }
 
   /** @brief Owned copies of the HaDeviceInfo strings (empty means not set). */
+  /** @brief Origin information sent as `o`. */
+  struct OriginData {
+    std::string name = JBHAMQTTDISCOVERY_NAME;
+    std::string sw_version = JBHAMQTTDISCOVERY_VERSION;
+    std::string url = JBHAMQTTDISCOVERY_URL;
+  };
+
   struct DeviceData {
     std::string node_id;
     std::string name;
@@ -473,6 +529,7 @@ private:
 
   JBLogger _log;
   DeviceData _device;
+  OriginData _origin;
   /** @brief A published discovery config, kept for re-publishing. */
   struct EntityConfig {
     std::string component;
@@ -501,8 +558,6 @@ private:
   volatile bool _republishPending = false;
   volatile uint32_t _republishAt = 0;
   uint32_t _republishDelayMaxMs = 5000;
-
-  static constexpr size_t JSON_BUF = 768;
 };
 
 /** @} */

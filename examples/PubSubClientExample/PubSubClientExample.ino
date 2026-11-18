@@ -70,12 +70,12 @@ void setup() {
   transport.connect(nodeId.c_str());
 
   HaSwitchConfig sw{
-    .common = { .object_id="relay1", .name="Desk Relay" }
+    .common = { .object_id="relay1", .name="Relay" }
   };
   ha.publishSwitchDiscovery(sw);
 
   HaSensorConfig temp{
-    .common = { .object_id="temperature", .name="Office Temperature" },
+    .common = { .object_id="temperature", .name="Temperature" },
     .unit_of_measurement="°C",
     .device_class="temperature"
   };

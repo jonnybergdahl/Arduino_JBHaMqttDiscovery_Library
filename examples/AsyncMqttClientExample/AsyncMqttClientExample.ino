@@ -67,7 +67,7 @@ void setup() {
   transport.connect(nodeId.c_str());
 
   HaSensorConfig temp{
-    .common = { .object_id="temperature", .name="Kitchen Temperature" },
+    .common = { .object_id="temperature", .name="Temperature" },
     .unit_of_measurement="°C",
     .device_class="temperature",
     .state_class="measurement"
@@ -75,7 +75,7 @@ void setup() {
   ha.publishSensorDiscovery(temp);
 
   HaSwitchConfig relay{
-    .common = { .object_id="relay1", .name="Kitchen Light" }
+    .common = { .object_id="relay1", .name="Light" }
   };
   ha.publishSwitchDiscovery(relay);
 }

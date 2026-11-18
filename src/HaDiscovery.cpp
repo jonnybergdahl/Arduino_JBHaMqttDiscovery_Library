@@ -60,6 +60,12 @@ void HaDiscovery::setDevice(const HaDeviceInfo& dev) {
   }
 }
 
+void HaDiscovery::setOrigin(const char* name, const char* sw_version, const char* url) {
+  _origin.name = name ? name : JBHAMQTTDISCOVERY_NAME;
+  _origin.sw_version = sw_version ? sw_version : "";
+  _origin.url = url ? url : "";
+}
+
 void HaDiscovery::onCommand(HaCommandCallback cb) {
   _onCommand = cb;
 }
@@ -236,15 +242,15 @@ bool HaDiscovery::publishSensorDiscovery(const HaSensorConfig& cfg, bool retaine
     return false;
   }
 
-  char json[JSON_BUF];
-  if (!buildSensorConfigJson(json, sizeof(json), cfg)) {
+  std::string json = buildSensorConfigJson(cfg);
+  if (json.empty()) {
 #ifdef HAS_LOG
-    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
 #endif
     return false;
   }
 
-  return storeAndPublishConfig("sensor", cfg.common.object_id, json, retained, qos);
+  return storeAndPublishConfig("sensor", cfg.common.object_id, json.c_str(), retained, qos);
 }
 
 bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retained, uint8_t qos) {
@@ -252,10 +258,10 @@ bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retaine
     return false;
   }
 
-  char json[JSON_BUF];
-  if (!buildSwitchConfigJson(json, sizeof(json), cfg)) {
+  std::string json = buildSwitchConfigJson(cfg);
+  if (json.empty()) {
 #ifdef HAS_LOG
-    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
 #endif
     return false;
   }
@@ -264,7 +270,7 @@ bool HaDiscovery::publishSwitchDiscovery(const HaSwitchConfig& cfg, bool retaine
                          ? std::string(cfg.command_topic_override)
                          : buildDefaultCommandTopic(cfg.common.object_id),
                        cfg.common.object_id);
-  return storeAndPublishConfig("switch", cfg.common.object_id, json, retained, qos);
+  return storeAndPublishConfig("switch", cfg.common.object_id, json.c_str(), retained, qos);
 }
 
 bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, bool retained, uint8_t qos) {
@@ -272,15 +278,15 @@ bool HaDiscovery::publishBinarySensorDiscovery(const HaBinarySensorConfig& cfg, 
     return false;
   }
 
-  char json[JSON_BUF];
-  if (!buildBinarySensorConfigJson(json, sizeof(json), cfg)) {
+  std::string json = buildBinarySensorConfigJson(cfg);
+  if (json.empty()) {
 #ifdef HAS_LOG
-    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
 #endif
     return false;
   }
 
-  return storeAndPublishConfig("binary_sensor", cfg.common.object_id, json, retained, qos);
+  return storeAndPublishConfig("binary_sensor", cfg.common.object_id, json.c_str(), retained, qos);
 }
 
 bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retained, uint8_t qos) {
@@ -288,10 +294,10 @@ bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retaine
     return false;
   }
 
-  char json[JSON_BUF];
-  if (!buildButtonConfigJson(json, sizeof(json), cfg)) {
+  std::string json = buildButtonConfigJson(cfg);
+  if (json.empty()) {
 #ifdef HAS_LOG
-    _log.error("Discovery config for %s does not fit in %u bytes", cfg.common.object_id, (unsigned)JSON_BUF);
+    _log.error("Could not build discovery config for %s (out of memory?)", cfg.common.object_id);
 #endif
     return false;
   }
@@ -300,7 +306,7 @@ bool HaDiscovery::publishButtonDiscovery(const HaButtonConfig& cfg, bool retaine
                          ? std::string(cfg.command_topic_override)
                          : buildDefaultCommandTopic(cfg.common.object_id),
                        cfg.common.object_id);
-  return storeAndPublishConfig("button", cfg.common.object_id, json, retained, qos);
+  return storeAndPublishConfig("button", cfg.common.object_id, json.c_str(), retained, qos);
 }
 
 bool HaDiscovery::removeEntity(const char* component, const char* object_id, uint8_t qos) {
@@ -471,33 +477,61 @@ bool HaDiscovery::publishConfigJson(const char* topic, const char* json, bool re
   return ok;
 }
 
-bool HaDiscovery::buildSensorConfigJson(char* out, size_t outLen, const HaSensorConfig& cfg) const {
-  if (!out || outLen == 0) {
-    return false;
+void HaDiscovery::addCommonFields(JsonDocument& doc, const char* component, const HaEntityCommon& common) const {
+  if (common.use_device_name) {
+    // null name: the entity is the device's main feature and takes the device name
+    doc["name"] = nullptr;
+  } else {
+    doc["name"] = common.name ? common.name : common.object_id;
+  }
+  doc["uniq_id"] = _device.node_id + "_" + common.object_id;
+  if (common.entity_id) {
+    doc["def_ent_id"] = std::string(component) + "." + common.entity_id;
   }
 
-  // Topics
-  std::string stateTopic = cfg.common.state_topic_override
-    ? cfg.common.state_topic_override
-    : buildDefaultStateTopic(cfg.common.object_id);
-
-  std::string availTopic = cfg.common.availability_topic_override
-    ? cfg.common.availability_topic_override
+  doc["avty_t"] = common.availability_topic_override
+    ? std::string(common.availability_topic_override)
     : buildDefaultAvailabilityTopic();
-
-  JsonDocument doc;
-  doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
-  doc["uniq_id"] = uniq;
-
-  doc["stat_t"] = stateTopic;
-  doc["avty_t"] = availTopic;
   doc["pl_avail"] = kAvailOnline;
   doc["pl_not_avail"] = kAvailOffline;
 
-  if (cfg.common.icon) {
-    doc["icon"] = cfg.common.icon;
+  if (common.icon) {
+    doc["ic"] = common.icon;
   }
+
+  addDeviceObject(doc);
+
+  JsonObject o = doc["o"].to<JsonObject>();
+  o["name"] = _origin.name;
+  if (!_origin.sw_version.empty()) {
+    o["sw"] = _origin.sw_version;
+  }
+  if (!_origin.url.empty()) {
+    o["url"] = _origin.url;
+  }
+}
+
+std::string HaDiscovery::stateTopicFor(const HaEntityCommon& common) const {
+  return common.state_topic_override
+    ? std::string(common.state_topic_override)
+    : buildDefaultStateTopic(common.object_id);
+}
+
+std::string HaDiscovery::serializeDoc(const JsonDocument& doc) {
+  if (doc.overflowed()) {
+    return std::string();
+  }
+  std::string out;
+  out.resize(measureJson(doc));
+  // std::string always has room for the terminator after size()
+  serializeJson(doc, &out[0], out.size() + 1);
+  return out;
+}
+
+std::string HaDiscovery::buildSensorConfigJson(const HaSensorConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "sensor", cfg.common);
+  doc["stat_t"] = stateTopicFor(cfg.common);
   if (cfg.unit_of_measurement) {
     doc["unit_of_meas"] = cfg.unit_of_measurement;
   }
@@ -507,141 +541,41 @@ bool HaDiscovery::buildSensorConfigJson(char* out, size_t outLen, const HaSensor
   if (cfg.state_class) {
     doc["stat_cla"] = cfg.state_class;
   }
-
-  addDeviceObject(doc);
-
-  size_t n = serializeJson(doc, out, outLen);
-  if (n == 0 || n >= outLen) {
-    return false;
-  }
-  return true;
+  return serializeDoc(doc);
 }
 
-bool HaDiscovery::buildSwitchConfigJson(char* out, size_t outLen, const HaSwitchConfig& cfg) const {
-  if (!out || outLen == 0) {
-    return false;
-  }
-
-  // Topics
-  std::string stateTopic = cfg.common.state_topic_override
-    ? cfg.common.state_topic_override
-    : buildDefaultStateTopic(cfg.common.object_id);
-
-  std::string cmdTopic = cfg.command_topic_override
-    ? cfg.command_topic_override
+std::string HaDiscovery::buildSwitchConfigJson(const HaSwitchConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "switch", cfg.common);
+  doc["stat_t"] = stateTopicFor(cfg.common);
+  doc["cmd_t"] = cfg.command_topic_override
+    ? std::string(cfg.command_topic_override)
     : buildDefaultCommandTopic(cfg.common.object_id);
-
-  std::string availTopic = cfg.common.availability_topic_override
-    ? cfg.common.availability_topic_override
-    : buildDefaultAvailabilityTopic();
-
-  const char* pOn = cfg.payload_on ? cfg.payload_on : kOn;
-  const char* pOff = cfg.payload_off ? cfg.payload_off : kOff;
-
-  JsonDocument doc;
-  doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
-  doc["uniq_id"] = uniq;
-  doc["stat_t"] = stateTopic;
-  doc["cmd_t"] = cmdTopic;
-  doc["pl_on"] = pOn;
-  doc["pl_off"] = pOff;
-  doc["avty_t"] = availTopic;
-  doc["pl_avail"] = kAvailOnline;
-  doc["pl_not_avail"] = kAvailOffline;
-  if (cfg.common.icon) {
-    doc["icon"] = cfg.common.icon;
-  }
-
-  addDeviceObject(doc);
-
-  size_t n = serializeJson(doc, out, outLen);
-  if (n == 0 || n >= outLen) {
-    return false;
-  }
-  return true;
+  doc["pl_on"] = cfg.payload_on ? cfg.payload_on : kOn;
+  doc["pl_off"] = cfg.payload_off ? cfg.payload_off : kOff;
+  return serializeDoc(doc);
 }
 
-bool HaDiscovery::buildButtonConfigJson(char* out, size_t outLen, const HaButtonConfig& cfg) const {
-  if (!out || outLen == 0) {
-    return false;
-  }
-
-  // command topic
-  std::string cmdTopic = cfg.command_topic_override
-    ? cfg.command_topic_override
+std::string HaDiscovery::buildButtonConfigJson(const HaButtonConfig& cfg) const {
+  JsonDocument doc;
+  addCommonFields(doc, "button", cfg.common);
+  doc["cmd_t"] = cfg.command_topic_override
+    ? std::string(cfg.command_topic_override)
     : buildDefaultCommandTopic(cfg.common.object_id);
-
-  // availability topic
-  std::string availTopic = cfg.common.availability_topic_override
-    ? cfg.common.availability_topic_override
-    : buildDefaultAvailabilityTopic();
-
-  const char* pPress = cfg.payload_press ? cfg.payload_press : kPress;
-
-  JsonDocument doc;
-  doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
-  doc["uniq_id"] = uniq;
-  doc["cmd_t"] = cmdTopic;
-  doc["pl_prs"] = pPress;
-  doc["avty_t"] = availTopic;
-  doc["pl_avail"] = kAvailOnline;
-  doc["pl_not_avail"] = kAvailOffline;
-  if (cfg.common.icon) {
-    doc["icon"] = cfg.common.icon;
-  }
-
-  addDeviceObject(doc);
-
-  size_t n = serializeJson(doc, out, outLen);
-  if (n == 0 || n >= outLen) {
-    return false;
-  }
-  return true;
+  doc["pl_prs"] = cfg.payload_press ? cfg.payload_press : kPress;
+  return serializeDoc(doc);
 }
 
-bool HaDiscovery::buildBinarySensorConfigJson(char* out, size_t outLen, const HaBinarySensorConfig& cfg) const {
-  if (!out || outLen == 0) {
-    return false;
-  }
-
-  // Topics
-  std::string stateTopic = cfg.common.state_topic_override
-    ? cfg.common.state_topic_override
-    : buildDefaultStateTopic(cfg.common.object_id);
-
-  std::string availTopic = cfg.common.availability_topic_override
-    ? cfg.common.availability_topic_override
-    : buildDefaultAvailabilityTopic();
-
-  const char* pOn = cfg.payload_on ? cfg.payload_on : kOn;
-  const char* pOff = cfg.payload_off ? cfg.payload_off : kOff;
-
+std::string HaDiscovery::buildBinarySensorConfigJson(const HaBinarySensorConfig& cfg) const {
   JsonDocument doc;
-  doc["name"] = cfg.common.name ? cfg.common.name : cfg.common.object_id;
-  std::string uniq = _device.node_id + "_" + cfg.common.object_id;
-  doc["uniq_id"] = uniq;
-  doc["stat_t"] = stateTopic;
-  doc["avty_t"] = availTopic;
-  doc["pl_avail"] = kAvailOnline;
-  doc["pl_not_avail"] = kAvailOffline;
-  doc["pl_on"] = pOn;
-  doc["pl_off"] = pOff;
-  if (cfg.common.icon) {
-    doc["icon"] = cfg.common.icon;
-  }
+  addCommonFields(doc, "binary_sensor", cfg.common);
+  doc["stat_t"] = stateTopicFor(cfg.common);
+  doc["pl_on"] = cfg.payload_on ? cfg.payload_on : kOn;
+  doc["pl_off"] = cfg.payload_off ? cfg.payload_off : kOff;
   if (cfg.device_class) {
     doc["dev_cla"] = cfg.device_class;
   }
-
-  addDeviceObject(doc);
-
-  size_t n = serializeJson(doc, out, outLen);
-  if (n == 0 || n >= outLen) {
-    return false;
-  }
-  return true;
+  return serializeDoc(doc);
 }
 
 bool HaDiscovery::pressButton(const char* object_id, const char* payload, bool retained, uint8_t qos) {
