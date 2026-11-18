@@ -33,7 +33,7 @@ lib_deps =
 >
 > ```ini
 > lib_deps =
->     https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git#v1.1.0
+>     https://github.com/jonnybergdahl/Arduino_JBHaMqttDiscovery.git#1.1.0
 >     bertmelis/espMqttClient
 > ```
 

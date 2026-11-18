@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 (unreleased)
+## 1.1.0 (2026-11-18)
 
 - `value_template` on entities (`val_tpl`), so several entities can read their state from one JSON state topic.
 - `unique_id` on entities, to keep the unique ID an entity already has.
